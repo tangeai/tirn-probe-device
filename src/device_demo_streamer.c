@@ -56,7 +56,7 @@ struct device_demo_streamer {
 
     uint64_t audio_next_pts_us;
     uint64_t video_next_pts_us;
-    uint64_t playback_origin_us;
+    uint64_t output_origin_us;
     uint64_t last_heartbeat_us;
     uint64_t audio_packets_sent;
     uint64_t video_frames_sent;
@@ -67,7 +67,7 @@ struct device_demo_streamer {
     int first_key_frame_logged;
     int first_send_wait_logged;
     int startup_video_pending;
-    int playback_active;
+    int output_active;
     int audio_finished;
     int video_finished;
 };
@@ -746,7 +746,7 @@ static int handle_startup_video_pending(device_demo_streamer_t *streamer,
 
     streamer->startup_video_pending = 0;
     streamer->first_send_wait_logged = 0;
-    streamer->playback_active = 0;
+    streamer->output_active = 0;
     streamer_log(stdout, "startup I frame flushed; entering steady streaming");
     return 0;
 }
@@ -791,7 +791,7 @@ static int handle_requested_key_frame(device_demo_streamer_t *streamer,
     }
 
     streamer->first_send_wait_logged = 0;
-    streamer->playback_active = 0;
+    streamer->output_active = 0;
     return 0;
 }
 
@@ -821,7 +821,7 @@ static void *streamer_worker_main(void *opaque)
             break;
         }
         if (!streaming_enabled) {
-            streamer->playback_active = 0;
+            streamer->output_active = 0;
             sleep_loop_interval();
             continue;
         }
@@ -848,21 +848,21 @@ static void *streamer_worker_main(void *opaque)
                 streamer_log(stderr, "failed to rewind media loop");
                 break;
             }
-            streamer->playback_active = 0;
+            streamer->output_active = 0;
             continue;
         }
 
         target_pts_us = earliest_enabled_pts_us(streamer, streaming_enabled, streaming_enabled);
-        if (!streamer->playback_active) {
+        if (!streamer->output_active) {
             now_us = monotonic_now_us();
-            streamer->playback_origin_us = now_us - target_pts_us;
+            streamer->output_origin_us = now_us - target_pts_us;
             streamer->last_heartbeat_us = now_us;
-            streamer->playback_active = 1;
+            streamer->output_active = 1;
         }
 
         now_us = monotonic_now_us();
         maybe_log_heartbeat(streamer, now_us);
-        target_time_us = streamer->playback_origin_us + target_pts_us;
+        target_time_us = streamer->output_origin_us + target_pts_us;
         if (target_time_us > now_us) {
             uint64_t sleep_us = target_time_us - now_us;
             if (sleep_us > (uint64_t)kLoopPollIntervalMs * 1000ULL) {
@@ -1014,7 +1014,7 @@ void device_demo_streamer_set_streaming_enabled(device_demo_streamer_t *streamer
 {
     pthread_mutex_lock(&streamer->mutex);
     if (!!streamer->streaming_enabled != !!enabled) {
-        streamer->playback_active = 0;
+        streamer->output_active = 0;
         if (enabled) {
             streamer->startup_video_pending = 1;
             streamer->force_key_frame = 0;
