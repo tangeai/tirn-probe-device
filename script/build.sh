@@ -11,6 +11,19 @@ require_file() {
   fi
 }
 
+case "${1:-}" in
+  --help)
+    printf 'Usage: %s\n' "$0"
+    exit 0
+    ;;
+  '')
+    ;;
+  *)
+    printf '[demo] unknown argument: %s\n' "$1" >&2
+    exit 1
+    ;;
+esac
+
 if [ "$(uname -s)" != "Linux" ]; then
   printf '[demo] build.sh only supports Linux hosts.\n' >&2
   exit 1

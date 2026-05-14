@@ -38,6 +38,7 @@
 
 - 这些脚本会自动基于仓库内 `Dockerfile` 构建本地镜像 `tirtc-device-example-env:latest`
 - `run_demo_in_docker.sh` 会在容器内重新编译 demo，确保实际运行的是当前源码
+- Demo 启动时统一把 Nano 发送缓冲上限设置为 `1 MiB`
 - 如果同一个 `device_id` 之前残留了旧容器，`run_demo_in_docker.sh` 会先清理旧容器，避免多进程污染
 - 仓库不内置 Docker App；用户仍需自己安装并启动 Docker Desktop 或同类运行时
 - 如不传 `--endpoint`，默认沿用 Nano upstream 内置的 `https://rtc.tange365.com`
@@ -72,7 +73,7 @@
 1. 查询 `tangeai/tirtc-example-device` 的 latest release
 2. 下载对应的 `<tag>.zip`
 3. 回填当前仓库的 `assets/` 和 `3rd/`
-4. 校验下面 5 个文件已经就位：
+4. 校验下面这些文件已经就位：
    - `assets/audio.g711a`
    - `assets/video.h264`
    - `3rd/include/tiRTC.h`
@@ -109,6 +110,7 @@ build/linux_device_uplink_demo
 
 - `assets/audio.g711a`
 - `assets/video.h264`
+- `3rd/lib/libtirtc.a`
 - `build/linux_device_uplink_demo`
 
 ### `./script/build_docker_image.sh`

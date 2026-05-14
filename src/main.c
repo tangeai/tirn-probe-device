@@ -346,7 +346,7 @@ static void on_event(int event, const void *data, int len)
     (void)data;
     (void)len;
 
-    if (event == TiEVENT_SYS_STARTED) {
+    if (event == TIRTC_EVENT_SYS_STARTED) {
         pthread_mutex_lock(&g_app.mutex);
         g_app.sdk_started = 1;
         pthread_cond_broadcast(&g_app.cond);
@@ -354,7 +354,7 @@ static void on_event(int event, const void *data, int len)
         log_message(stdout, "TiRTC started, waiting for client connections");
         return;
     }
-    if (event == TiEVENT_SYS_STOPPED) {
+    if (event == TIRTC_EVENT_SYS_STOPPED) {
         pthread_mutex_lock(&g_app.mutex);
         g_app.sdk_stopped = 1;
         pthread_cond_broadcast(&g_app.cond);
@@ -362,7 +362,7 @@ static void on_event(int event, const void *data, int len)
         log_message(stdout, "TiRTC stopped");
         return;
     }
-    if (event == TiEVENT_ACCESS_HIJACKING) {
+    if (event == TIRTC_EVENT_ACCESS_HIJACKING) {
         log_message(stderr, "warning: endpoint access may be hijacked");
         return;
     }
@@ -567,6 +567,13 @@ int main(int argc, char **argv)
     signal(SIGTERM, signal_handler);
 
     log_message(stdout, "TiRTC version: %s", TiRtcGetVersion());
+    if (TiRtcSetOption(TIRTC_OPT_MAX_SEND_BUFFER,
+                       &kSdkMaxSendBufferBytes,
+                       sizeof(kSdkMaxSendBufferBytes)) != 0) {
+        log_message(stderr, "failed to set SDK max send buffer");
+        return 1;
+    }
+    log_message(stdout, "SDK max send buffer set to %u bytes", kSdkMaxSendBufferBytes);
     if (TiRtcInit() != 0) {
         log_message(stderr, "TiRtcInit failed");
         return 1;

@@ -55,6 +55,7 @@ require_value device_id "$device_id"
 require_value device_secret_key "$device_secret_key"
 require_file "$repo_root/assets/audio.g711a"
 require_file "$repo_root/assets/video.h264"
+require_file "$repo_root/3rd/lib/libtirtc.a"
 require_file "$binary"
 
 cd "$repo_root"

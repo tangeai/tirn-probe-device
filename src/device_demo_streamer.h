@@ -13,6 +13,7 @@ static const size_t kAudioPacketBytes = 320;
 static const uint32_t kAudioPacketDurationMs = 40;
 static const uint32_t kVideoFps = 15;
 static const uint32_t kSdkLogLevel = 4;
+static const uint32_t kSdkMaxSendBufferBytes = 1024u * 1024u;
 static const uint32_t kHeartbeatIntervalMs = 5000;
 static const uint32_t kLoopPollIntervalMs = 5;
 static const uint32_t kConnectionCleanupTimeoutMs = 5000;
