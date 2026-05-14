@@ -5,7 +5,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 owner='tangeai'
 repo_name='tirtc-example-device'
-latest_release_api="https://api.github.com/repos/$owner/$repo_name/releases/latest"
+latest_release_url="https://github.com/$owner/$repo_name/releases/latest"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -26,7 +26,7 @@ print_usage() {
 Usage: ./script/prepare.sh
 
 Behavior:
-  1. Query the latest GitHub release for tangeai/tirtc-example-device
+  1. Resolve the latest GitHub release for tangeai/tirtc-example-device
   2. Download <tag>.zip from that release
   3. Replace local assets/ and 3rd/ with the downloaded runtime package
 USAGE
@@ -47,7 +47,6 @@ esac
 
 require_command curl
 require_command unzip
-require_command python3
 require_file "$repo_root/README.md"
 require_file "$repo_root/Makefile"
 
@@ -59,8 +58,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 printf '%s\n' '[demo] resolving latest runtime release'
-release_json=$(curl -fsSL "$latest_release_api")
-release_tag=$(printf '%s' "$release_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+release_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$latest_release_url")
+release_tag=${release_url##*/}
+if [ -z "$release_tag" ] || [ "$release_tag" = 'latest' ]; then
+  printf '[demo] failed to resolve latest release tag from %s\n' "$release_url" >&2
+  exit 1
+fi
 asset_name="$release_tag.zip"
 asset_url="https://github.com/$owner/$repo_name/releases/download/$release_tag/$asset_name"
 extract_root="$work_dir/extract"

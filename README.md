@@ -50,7 +50,6 @@
 - Linux x86_64
 - `curl`
 - `unzip`
-- `python3`
 - `gcc`
 - `make`
 
@@ -70,7 +69,7 @@
 
 作用：
 
-1. 查询 `tangeai/tirtc-example-device` 的 latest release
+1. 解析 `tangeai/tirtc-example-device` 的 latest release
 2. 下载对应的 `<tag>.zip`
 3. 回填当前仓库的 `assets/` 和 `3rd/`
 4. 校验下面这些文件已经就位：
