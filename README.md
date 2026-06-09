@@ -93,8 +93,6 @@ tar -xzf "$linux_sdk_tgz" \
   --strip-components 1
 ```
 
-`Makefile` 只依赖解包后的目录结构，不依赖 tgz 文件名。Linux 标准包和 `__nosctp` 包都可直接使用。
-
 ## macOS 上自选 Docker 跑 Linux Demo
 
 需要在 macOS 上临时跑 Linux x86_64 版时：
