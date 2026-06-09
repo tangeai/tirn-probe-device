@@ -12,31 +12,12 @@ Demo 演示一条固定流程：
 
 ## 快速开始
 
-### macOS arm64
+平台要求：
 
-要求：
-
-- macOS arm64
-- Xcode Command Line Tools
-- `make`
-
-执行：
-
-```sh
-./script/build.sh
-./script/run_demo.sh \
-  --device-id your_device_id \
-  --device-secret-key your_device_secret_key
-```
-
-### Linux x86_64
-
-要求：
-
-- Linux x86_64，建议 glibc 2.35 或更高版本
-- GCC/Make 工具链，例如 Ubuntu 上的 `build-essential`
-
-执行：
+| 平台 | 要求 |
+| --- | --- |
+| macOS arm64 | Xcode Command Line Tools、`make` |
+| Linux x86_64 | glibc 2.35 或更高版本、GCC/Make 工具链，例如 Ubuntu 上的 `build-essential` |
 
 ```sh
 ./script/build.sh
