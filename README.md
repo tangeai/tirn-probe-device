@@ -1,161 +1,169 @@
-# Linux 设备端送流 Demo
+# TiRTC 设备端送流 Demo
 
-这是一个最小 Linux 设备端参考 Demo，主阅读入口是 `src/main.c`。
+这是一个最小设备端参考 Demo，主阅读入口是 `src/main.c`。
 
-它只演示这一条固定流程：
+Demo 演示一条固定流程：
 
-`启动 -> 等待客户端连接 -> 立即送固定音视频 -> 断开后继续等待`
+```text
+启动 -> 等待客户端连接 -> 立即发送固定音视频 -> 断开后继续等待
+```
+
+仓库已经预置默认媒体文件和 TiRTC SDK。正常情况下，克隆后不需要再下载 release 包或 SDK 包。
 
 ## 快速开始
 
-### Docker 路径（推荐给 macOS / Windows / 不想污染宿主机的用户）
+### macOS arm64
 
 要求：
 
-- Docker Desktop 或其他可用的 Docker Engine
-- `docker` CLI 已在 PATH 中可用
-- Windows 用户建议从 Git Bash 或 WSL 运行这些脚本
-
-执行顺序固定为：
-
-```sh
-./script/prepare_in_docker.sh
-./script/build_in_docker.sh
-./script/run_demo_in_docker.sh \
-  --device-id your_device_id \
-  --device-secret-key your_device_secret_key
-```
-
-例如：
-
-```sh
-./script/run_demo_in_docker.sh \
-  --device-id TESTFENGABCD \
-  --device-secret-key PRoGgX6lDelY4y9df2WW9U9NR10rBfXX
-```
-
-说明：
-
-- 这些脚本会自动基于仓库内 `Dockerfile` 构建本地镜像 `tirtc-device-example-env:latest`
-- `run_demo_in_docker.sh` 会在容器内重新编译 demo，确保实际运行的是当前源码
-- Demo 启动时统一把 Nano 发送缓冲上限设置为 `1 MiB`
-- 如果同一个 `device_id` 之前残留了旧容器，`run_demo_in_docker.sh` 会先清理旧容器，避免多进程污染
-- 仓库不内置 Docker App；用户仍需自己安装并启动 Docker Desktop 或同类运行时
-- 如不传 `--endpoint`，默认沿用 Nano upstream 内置的 `https://rtc.tange365.com`
-
-### Native Linux x86_64 路径
-
-要求：
-
-- Linux x86_64
-- `curl`
-- `unzip`
-- `gcc`
+- macOS arm64
+- Xcode Command Line Tools
 - `make`
 
-执行顺序固定为：
+执行：
 
 ```sh
-./script/prepare.sh
 ./script/build.sh
 ./script/run_demo.sh \
   --device-id your_device_id \
   --device-secret-key your_device_secret_key
 ```
 
-## 脚本分别做什么
+### Linux x86_64
 
-### `./script/prepare.sh`
+要求：
 
-作用：
+- Linux x86_64，建议 glibc 2.35 或更高版本
+- GCC/Make 工具链，例如 Ubuntu 上的 `build-essential`
 
-1. 解析 `tangeai/tirtc-example-device` 的 latest release
-2. 下载对应的 `<tag>.zip`
-3. 回填当前仓库的 `assets/` 和 `3rd/`
-4. 校验下面这些文件已经就位：
-   - `assets/audio.g711a`
-   - `assets/video.h264`
-   - `3rd/include/tiRTC.h`
-   - `3rd/include/basedef.h`
-   - `3rd/lib/libtirtc.a`
-
-查看说明：
+执行：
 
 ```sh
-./script/prepare.sh --help
+./script/build.sh
+./script/run_demo.sh \
+  --device-id your_device_id \
+  --device-secret-key your_device_secret_key
 ```
+
+## 预置内容
+
+媒体文件已经固化在仓库：
+
+```text
+assets/audio.g711a
+assets/video.h264
+```
+
+默认 SDK 包和解包后的 SDK 都已经固化在仓库：
+
+```text
+3rd/packages/tirtc__macos-arm64__xcode26.5__v0.1.4.tgz
+3rd/packages/tirtc__macos-arm64__xcode26.5__v0.1.4.tgz.sha256
+3rd/packages/tirtc__linux-x86_64__gcc11-glibc2.35__v0.1.4.tgz
+3rd/packages/tirtc__linux-x86_64__gcc11-glibc2.35__v0.1.4.tgz.sha256
+
+3rd/macos-arm64/
+3rd/linux-x86_64/
+```
+
+`script/build.sh` 会按当前宿主平台自动选择：
+
+- macOS arm64 -> `3rd/macos-arm64`
+- Linux x86_64 -> `3rd/linux-x86_64`
+
+构建产物：
+
+```text
+build/macos-arm64/device_uplink_demo
+build/macos-arm64/libtgrtc.dylib
+build/linux-x86_64/device_uplink_demo
+```
+
+## 脚本说明
 
 ### `./script/build.sh`
 
-作用：编译生成 Demo 可执行文件。
+按当前 native 平台编译 Demo。
 
-输出：
-
-```text
-build/linux_device_uplink_demo
+```sh
+./script/build.sh
+./script/build.sh --platform macos-arm64
+./script/build.sh --platform linux-x86_64
 ```
 
-如果缺少下面任一文件，`build.sh` 会直接失败：
-
-- `3rd/include/tiRTC.h`
-- `3rd/include/basedef.h`
-- `3rd/lib/libtirtc.a`
+`--platform` 必须和当前宿主平台一致；脚本不做交叉编译。
 
 ### `./script/run_demo.sh`
 
-作用：按给定 `device_id`、`device_secret_key` 拉起设备端送流 Demo；`endpoint` 可选。
-
-如果缺少下面任一文件，`run_demo.sh` 会直接失败：
-
-- `assets/audio.g711a`
-- `assets/video.h264`
-- `3rd/lib/libtirtc.a`
-- `build/linux_device_uplink_demo`
-
-### `./script/build_docker_image.sh`
-
-作用：构建 Docker 路径共用的本地镜像。
-
-默认镜像名：
-
-```text
-tirtc-device-example-env:latest
-```
-
-常用命令：
+运行当前平台的 Demo。
 
 ```sh
-./script/build_docker_image.sh
-./script/build_docker_image.sh --rebuild
+./script/run_demo.sh \
+  --device-id your_device_id \
+  --device-secret-key your_device_secret_key
 ```
 
-### `./script/prepare_in_docker.sh`
+运行前请先执行 `./script/build.sh`。
 
-作用：在 Docker 环境中执行 `./script/prepare.sh`。
+## 更新或替换 SDK
 
-适用场景：
+SDK 包浏览地址：
 
-- 宿主机不是 Linux x86_64
-- 不想在宿主机手动安装 `curl`、`unzip`、`python3`
+- macOS arm64: https://repo-sdk.tange-ai.com/service/rest/repository/browse/tirtc-sdks/releases/macos-arm64/
+- Linux x86_64: https://repo-sdk.tange-ai.com/service/rest/repository/browse/tirtc-sdks/releases/linux-x86_64/
 
-### `./script/build_in_docker.sh`
+当前默认包：
 
-作用：在 Docker 环境中执行 `./script/build.sh`。
+```text
+tirtc__macos-arm64__xcode26.5__v0.1.4.tgz
+tirtc__linux-x86_64__gcc11-glibc2.35__v0.1.4.tgz
+```
 
-适用场景：
+下载新包时，实际文件 URL 使用 `/repository/` 路径。例如：
 
-- 宿主机不是 Linux x86_64
-- 想固定用仓库内 Docker 基线编译 demo
+```sh
+cd 3rd/packages
 
-### `./script/run_demo_in_docker.sh`
+curl -fLO https://repo-sdk.tange-ai.com/repository/tirtc-sdks/releases/macos-arm64/tirtc__macos-arm64__xcode26.5__v0.1.4.tgz
+curl -fLO https://repo-sdk.tange-ai.com/repository/tirtc-sdks/releases/macos-arm64/tirtc__macos-arm64__xcode26.5__v0.1.4.tgz.sha256
 
-作用：在 Docker 环境中串行执行 `./script/build.sh` 和 `./script/run_demo.sh`。
+curl -fLO https://repo-sdk.tange-ai.com/repository/tirtc-sdks/releases/linux-x86_64/tirtc__linux-x86_64__gcc11-glibc2.35__v0.1.4.tgz
+curl -fLO https://repo-sdk.tange-ai.com/repository/tirtc-sdks/releases/linux-x86_64/tirtc__linux-x86_64__gcc11-glibc2.35__v0.1.4.tgz.sha256
+```
 
-它还会额外做两件事：
+解包到工程约定目录：
 
-1. 运行前自动清理同一个 `device_id` 的旧 demo 容器
-2. 始终使用当前源码重新编译，避免误跑旧二进制
-3. 不传 `--endpoint` 时沿用 Nano upstream 的默认 service endpoint
+```sh
+rm -rf 3rd/macos-arm64
+mkdir -p 3rd/macos-arm64
+tar -xzf 3rd/packages/tirtc__macos-arm64__xcode26.5__v0.1.4.tgz \
+  -C 3rd/macos-arm64 \
+  --strip-components 1
+
+rm -rf 3rd/linux-x86_64
+mkdir -p 3rd/linux-x86_64
+tar -xzf 3rd/packages/tirtc__linux-x86_64__gcc11-glibc2.35__v0.1.4.tgz \
+  -C 3rd/linux-x86_64 \
+  --strip-components 1
+```
+
+`Makefile` 只依赖解包后的目录结构，不依赖 tgz 文件名。替换 SDK 时，保持 `3rd/macos-arm64` 和 `3rd/linux-x86_64` 的目录结构一致即可。
+
+Linux 目录中还可能存在 `__nosctp` 包；当前 Demo 默认使用带 `libusrsctp.a` 的标准包。如果切换到 `__nosctp` 包，需要同步调整 `Makefile` 中 Linux SDK 的库名。
+
+## macOS 上自选 Docker 跑 Linux Demo
+
+本工程不再维护 Dockerfile 或 Docker 脚本。确实需要在 macOS 上跑 Linux x86_64 Demo 时，可以自己使用临时容器：
+
+```sh
+docker run --rm --platform linux/amd64 \
+  -v "$PWD":/work \
+  -w /work \
+  ubuntu:22.04 \
+  bash -lc 'apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates make && ./script/build.sh && ./script/run_demo.sh --device-id your_device_id --device-secret-key your_device_secret_key'
+```
+
+这只是使用者自选的 Linux 运行环境，不是项目维护入口。
 
 ## 运行后会发生什么
 
@@ -172,25 +180,16 @@ tirtc-device-example-env:latest
 
 ```text
 .
-├── Dockerfile
 ├── 3rd/
-│   ├── include/
-│   │   ├── basedef.h
-│   │   └── tiRTC.h
-│   └── lib/
-│       └── libtirtc.a
+│   ├── linux-x86_64/
+│   ├── macos-arm64/
+│   └── packages/
 ├── assets/
 │   ├── audio.g711a
 │   └── video.h264
 ├── script/
-│   ├── build_docker_image.sh
 │   ├── build.sh
-│   ├── build_in_docker.sh
-│   ├── docker_common.sh
-│   ├── prepare.sh
-│   ├── prepare_in_docker.sh
-│   ├── run_demo.sh
-│   └── run_demo_in_docker.sh
+│   └── run_demo.sh
 ├── src/
 │   ├── device_demo_streamer.c
 │   ├── device_demo_streamer.h
@@ -198,19 +197,3 @@ tirtc-device-example-env:latest
 ├── Makefile
 └── README.md
 ```
-
-各目录职责：
-
-- `src/main.c`：进程入口、参数解析、TiRTC 生命周期、连接管理
-- `src/device_demo_streamer.c/.h`：固定音视频文件读取、切片、循环送流
-- `Dockerfile`：Docker 路径的统一 Linux amd64 运行环境
-- `script/build_docker_image.sh`：构建 Docker 路径共用镜像
-- `script/prepare.sh`：下载 latest release 运行时包并回填 `assets/`、`3rd/`
-- `script/prepare_in_docker.sh`：在 Docker 中执行运行时准备
-- `script/build.sh`：编译入口
-- `script/build_in_docker.sh`：在 Docker 中执行编译
-- `script/run_demo.sh`：运行入口
-- `script/run_demo_in_docker.sh`：在 Docker 中编译并运行 demo
-- `script/docker_common.sh`：Docker 路径共用的镜像、挂载和容器清理逻辑
-- `assets/`：固定媒体文件
-- `3rd/`：TiRTC Nano 头文件和静态库

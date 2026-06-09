@@ -74,7 +74,7 @@ static void signal_handler(int signal_number)
 static void print_usage(const char *program_name)
 {
     fprintf(stderr,
-            "Usage: %s [--endpoint <url>] --device-id <id> --device-secret-key <key>\n",
+            "Usage: %s --device-id <id> --device-secret-key <key>\n",
             program_name);
 }
 
@@ -550,11 +550,16 @@ int main(int argc, char **argv)
         .on_unsubscribe_audio = on_unsubscribe_audio,
     };
 
-    log_message(stdout, "validating startup inputs");
-    if (parse_arguments(argc, argv, &config) != 0) {
+    int parse_result = parse_arguments(argc, argv, &config);
+    if (parse_result > 0) {
+        return 0;
+    }
+    if (parse_result < 0) {
         print_usage(argv[0]);
         return 1;
     }
+
+    log_message(stdout, "validating startup inputs");
     if (validate_required_file(kAudioFilePath) != 0 ||
         validate_required_file(kVideoFilePath) != 0) {
         return 1;
@@ -590,8 +595,6 @@ int main(int argc, char **argv)
             return 1;
         }
         log_message(stdout, "using endpoint override: %s", config.endpoint);
-    } else {
-        log_message(stdout, "using TiRTC default service endpoint");
     }
 
     log_message(stdout,

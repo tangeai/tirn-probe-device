@@ -1,30 +1,82 @@
-CC ?= gcc
+CC ?= cc
+
+UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+
+ifeq ($(UNAME_S),Darwin)
+  ifeq ($(UNAME_M),arm64)
+    DETECTED_PLATFORM := macos-arm64
+  endif
+endif
+ifeq ($(UNAME_S),Linux)
+  ifneq (,$(filter x86_64 amd64,$(UNAME_M)))
+    DETECTED_PLATFORM := linux-x86_64
+  endif
+endif
+
+PLATFORM ?= $(DETECTED_PLATFORM)
+SUPPORTED_PLATFORMS := macos-arm64 linux-x86_64
+
+ifeq (,$(filter $(PLATFORM),$(SUPPORTED_PLATFORMS)))
+  $(error unsupported PLATFORM "$(PLATFORM)"; expected one of: $(SUPPORTED_PLATFORMS))
+endif
 
 BUILD_DIR := build
-TARGET := $(BUILD_DIR)/linux_device_uplink_demo
+TARGET := $(BUILD_DIR)/$(PLATFORM)/device_uplink_demo
+OBJ_DIR := $(BUILD_DIR)/$(PLATFORM)/obj
 SRC_DIR := src
-NANO_INCLUDE_DIR := 3rd/include
-NANO_LIB := 3rd/lib/libtirtc.a
+TIRTC_SDK_DIR := 3rd/$(PLATFORM)
+TIRTC_INCLUDE_DIR := $(TIRTC_SDK_DIR)/include/tirtc
+TIRTC_LIB_DIR := $(TIRTC_SDK_DIR)/lib
 
 SRCS := \
 	$(SRC_DIR)/main.c \
 	$(SRC_DIR)/device_demo_streamer.c
 
-OBJS := $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
-CFLAGS := -std=c11 -Wall -Wextra -Werror -I$(SRC_DIR) -I$(NANO_INCLUDE_DIR)
-LDFLAGS := $(NANO_LIB) -pthread -lm
+OBJS := $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+CPPFLAGS += -I$(SRC_DIR) -I$(TIRTC_INCLUDE_DIR)
+CFLAGS += -std=c11 -Wall -Wextra -Werror
 
-.PHONY: all clean
+ifeq ($(PLATFORM),macos-arm64)
+TIRTC_LIBS := \
+	$(TIRTC_LIB_DIR)/libTiRTC.a \
+	$(TIRTC_LIB_DIR)/libTGTRP.a \
+	$(TIRTC_LIB_DIR)/libmbedtls.a \
+	$(TIRTC_LIB_DIR)/libmbedx509.a \
+	$(TIRTC_LIB_DIR)/libmbedcrypto.a
+TIRTC_RUNTIME_LIBS := $(wildcard $(TIRTC_LIB_DIR)/*.dylib)
+LDLIBS := $(TIRTC_LIBS) -pthread -lm
+endif
+
+ifeq ($(PLATFORM),linux-x86_64)
+TIRTC_LIBS := \
+	$(TIRTC_LIB_DIR)/libTiRTC.a \
+	$(TIRTC_LIB_DIR)/libwebrtc.a \
+	$(TIRTC_LIB_DIR)/libusrsctp.a \
+	$(TIRTC_LIB_DIR)/libmbedtls.a
+LDLIBS := -Wl,--start-group $(TIRTC_LIBS) -Wl,--end-group -pthread -lm -ldl
+endif
+
+.PHONY: all clean clean-platform print-platform
 
 all: $(TARGET)
 
-$(TARGET): $(OBJS) $(NANO_LIB)
+$(TARGET): $(OBJS) $(TIRTC_LIBS) $(TIRTC_RUNTIME_LIBS)
 	@mkdir -p $(dir $@)
-	$(CC) $(OBJS) $(LDFLAGS) -o $@
+	$(CC) $(OBJS) $(LDLIBS) -o $@
+ifneq ($(strip $(TIRTC_RUNTIME_LIBS)),)
+	cp $(TIRTC_RUNTIME_LIBS) $(dir $@)
+endif
 
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+print-platform:
+	@printf '%s\n' "$(PLATFORM)"
+
+clean-platform:
+	rm -rf $(BUILD_DIR)/$(PLATFORM)
 
 clean:
 	rm -rf $(BUILD_DIR)
