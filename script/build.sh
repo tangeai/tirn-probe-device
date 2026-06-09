@@ -61,8 +61,14 @@ validate_sdk() {
       require_file "$sdk_dir/lib/libtgrtc.dylib"
       ;;
     linux-x86_64)
-      require_file "$sdk_dir/lib/libwebrtc.a"
-      require_file "$sdk_dir/lib/libusrsctp.a"
+      if [ -f "$sdk_dir/lib/libwebrtc.a" ] && [ -f "$sdk_dir/lib/libusrsctp.a" ]; then
+        :
+      elif [ ! -f "$sdk_dir/lib/libwebrtc_nosctp.a" ]; then
+        printf '[demo] missing required file: %s or %s\n' \
+          "$sdk_dir/lib/libwebrtc.a" \
+          "$sdk_dir/lib/libwebrtc_nosctp.a" >&2
+        exit 1
+      fi
       require_file "$sdk_dir/lib/libmbedtls.a"
       ;;
     *)
@@ -89,8 +95,11 @@ sdk_complete() {
       [ -f "$sdk_dir/lib/libtgrtc.dylib" ] || return 1
       ;;
     linux-x86_64)
-      [ -f "$sdk_dir/lib/libwebrtc.a" ] || return 1
-      [ -f "$sdk_dir/lib/libusrsctp.a" ] || return 1
+      if [ -f "$sdk_dir/lib/libwebrtc.a" ] && [ -f "$sdk_dir/lib/libusrsctp.a" ]; then
+        :
+      else
+        [ -f "$sdk_dir/lib/libwebrtc_nosctp.a" ] || return 1
+      fi
       [ -f "$sdk_dir/lib/libmbedtls.a" ] || return 1
       ;;
     *)

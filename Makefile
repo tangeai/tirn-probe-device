@@ -49,10 +49,17 @@ LDLIBS := $(TIRTC_LIBS) -pthread -lm
 endif
 
 ifeq ($(PLATFORM),linux-x86_64)
+ifneq ($(and $(wildcard $(TIRTC_LIB_DIR)/libwebrtc.a),$(wildcard $(TIRTC_LIB_DIR)/libusrsctp.a)),)
+TIRTC_WEBRTC_LIBS := \
+	$(TIRTC_LIB_DIR)/libwebrtc.a \
+	$(TIRTC_LIB_DIR)/libusrsctp.a
+else
+TIRTC_WEBRTC_LIBS := \
+	$(TIRTC_LIB_DIR)/libwebrtc_nosctp.a
+endif
 TIRTC_LIBS := \
 	$(TIRTC_LIB_DIR)/libTiRTC.a \
-	$(TIRTC_LIB_DIR)/libwebrtc.a \
-	$(TIRTC_LIB_DIR)/libusrsctp.a \
+	$(TIRTC_WEBRTC_LIBS) \
 	$(TIRTC_LIB_DIR)/libmbedtls.a
 LDLIBS := -Wl,--start-group $(TIRTC_LIBS) -Wl,--end-group -pthread -lm -ldl
 endif

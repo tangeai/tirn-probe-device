@@ -93,9 +93,7 @@ tar -xzf "$linux_sdk_tgz" \
   --strip-components 1
 ```
 
-`Makefile` 只依赖解包后的目录结构，不依赖 tgz 文件名。替换 SDK 时，保持 `3rd/macos-arm64` 和 `3rd/linux-x86_64` 的目录结构一致即可。
-
-Linux 目录中还可能存在 `__nosctp` 包；当前 Demo 默认使用带 `libusrsctp.a` 的标准包。如果切换到 `__nosctp` 包，需要同步调整 `Makefile` 中 Linux SDK 的库名。
+`Makefile` 只依赖解包后的目录结构，不依赖 tgz 文件名。Linux 标准包和 `__nosctp` 包都可直接使用。
 
 ## macOS 上自选 Docker 跑 Linux Demo
 
