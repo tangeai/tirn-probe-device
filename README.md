@@ -4,6 +4,14 @@
 
 仓库已经预置默认媒体文件和 TiRTC SDK。正常情况下，克隆后不需要再下载 release 包或 SDK 包。
 
+## ESP32-S3 微信 VoIP 示例
+
+ESP32-S3 微信 IoT VoIP 设备端示例放在:
+
+- [`examples/wechat_voip_esp32s3`](examples/wechat_voip_esp32s3)
+
+该示例包含 Wi-Fi、时间同步、TiRTC 上线、业务 WebSocket、微信呼入、设备主动呼叫、接听、拒接、挂断和示例音频发送流程.
+
 ## 快速开始
 
 平台要求：
