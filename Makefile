@@ -37,38 +37,24 @@ OBJS := $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 CPPFLAGS += -I$(SRC_DIR) -I$(TIRTC_INCLUDE_DIR)
 CFLAGS += -std=c11 -Wall -Wextra -Werror
 
+TIRTC_LIBS := $(TIRTC_LIB_DIR)/libTiRTC.a
+TIRTC_RUNTIME_LIBS :=
+
 ifeq ($(PLATFORM),macos-arm64)
-TIRTC_LIBS := \
-	$(TIRTC_LIB_DIR)/libTiRTC.a \
-	$(TIRTC_LIB_DIR)/libTGTRP.a \
-	$(TIRTC_LIB_DIR)/libmbedtls.a \
-	$(TIRTC_LIB_DIR)/libmbedx509.a \
-	$(TIRTC_LIB_DIR)/libmbedcrypto.a
-TIRTC_RUNTIME_LIBS := $(wildcard $(TIRTC_LIB_DIR)/*.dylib)
-LDLIBS := $(TIRTC_LIBS) -pthread -lm
+TIRTC_LIBS := $(TIRTC_LIB_DIR)/libTiRTC.dylib
+TIRTC_RUNTIME_LIBS := $(TIRTC_LIB_DIR)/libTiRTC.dylib $(TIRTC_LIB_DIR)/libtgrtc.dylib
+LDLIBS := -L$(TIRTC_LIB_DIR) -lTiRTC -Wl,-rpath,@executable_path -pthread -lm
 endif
 
 ifeq ($(PLATFORM),linux-x86_64)
-ifneq ($(and $(wildcard $(TIRTC_LIB_DIR)/libwebrtc.a),$(wildcard $(TIRTC_LIB_DIR)/libusrsctp.a)),)
-TIRTC_WEBRTC_LIBS := \
-	$(TIRTC_LIB_DIR)/libwebrtc.a \
-	$(TIRTC_LIB_DIR)/libusrsctp.a
-else
-TIRTC_WEBRTC_LIBS := \
-	$(TIRTC_LIB_DIR)/libwebrtc_nosctp.a
-endif
-TIRTC_LIBS := \
-	$(TIRTC_LIB_DIR)/libTiRTC.a \
-	$(TIRTC_WEBRTC_LIBS) \
-	$(TIRTC_LIB_DIR)/libmbedtls.a
-LDLIBS := -Wl,--start-group $(TIRTC_LIBS) -Wl,--end-group -pthread -lm -ldl
+LDLIBS := $(TIRTC_LIBS) -pthread -lm -ldl
 endif
 
 .PHONY: all clean clean-platform print-platform
 
 all: $(TARGET)
 
-$(TARGET): $(OBJS) $(TIRTC_LIBS) $(TIRTC_RUNTIME_LIBS)
+$(TARGET): $(OBJS) $(TIRTC_LIBS)
 	@mkdir -p $(dir $@)
 	$(CC) $(OBJS) $(LDLIBS) -o $@
 ifneq ($(strip $(TIRTC_RUNTIME_LIBS)),)

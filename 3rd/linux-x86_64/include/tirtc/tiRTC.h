@@ -170,6 +170,9 @@
 extern "C" {
 #endif
 
+#define TIRTC_VERSION_MAJOR     2
+#define TIRTC_VERSION_MINOR     2
+#define TIRTC_VERSION_PATCH     0
 /* -------------------------------------------------------------------------
  * 错误码
  * ------------------------------------------------------------------------- */
@@ -223,7 +226,9 @@ typedef enum {
  */
 typedef enum TIRTCOPTION {
 
-    /** 服务入口地址（`const char *`）。不设置则使用探鸽默认入口。 */
+    /** 服务入口地址（`const char *`）。不设置则使用探鸽默认入口。
+     *  @note SDK可能被配置为不支持https, 此时传https地址会返回 TIRTC_E_INVALID_PARAMETER.
+     */
     TIRTC_OPT_SERVICE_ENDPOINT = 1,
 
     /** 设备 secret key（`const char *`）。
@@ -261,6 +266,12 @@ typedef enum TIRTCOPTION {
      */
     TIRTC_OPT_CONNECT_CACHE,
 
+    /** App id. App必传, 设备可选. */
+    TIRTC_OPT_APP_ID,
+
+    /** 开发者自己维护的设备标识, 可以取MAC/ICCID/IMEI/芯片标识/..., 唯一作用是与设备 uuid 一起用来防止生产重号. */
+    TIRTC_OPT_CLIENT_ID,
+
     /** 是否在连接关闭时打印统计日志 （`int *`, 0 不打印 / 1 打印). 默认 0. */
     //TIRTC_OPT_PRINT_CONN_STAT
 
@@ -275,6 +286,7 @@ typedef enum TIRTCMEDIA {
     TIRTC_AUDIO_ALAW = 2,               ///< G.711 A-law
     TIRTC_AUDIO_AAC  = 3,               ///< AAC 压缩音频
     TIRTC_AUDIO_OPUS = 4,               ///< Opus 压缩音频
+    TIRTC_AUDIO_AMR  = 5,               ///< AMR. 根据音频采样参数选择 wb/nb
     TIRTC_AUDIO_MAX  = 64,              ///< 1\~64 预留给音频类型
 
     TIRTC_VIDEO_MIN  = 65,                       ///< 视频类型起始值
@@ -453,6 +465,9 @@ typedef void (*TIRTCLOGCALLBACK)(const char *log, uint32_t length);
 
 /** 返回 SDK 版本字符串（静态存储，无需释放）。 */
 TiRTC_EXPORT const char *TiRtcGetVersion(void);
+
+/** 返回json格式的版本描述字符串（静态存储，无需释放）。*/
+TiRTC_EXPORT const char *TiRtcGetBuildInfo(void);
 
 /** 将错误码转换为可读字符串。
  *
@@ -768,8 +783,7 @@ TiRTC_EXPORT void TiRtcLogConfig(int bOutputToConsole, const char *path, uint32_
 
 /** 设置日志详细程度。
  *
- * \param level 日志等级，值越大越详细。
- *              `level > 10` 时同时将底层 WebRTC 库的日志级别设为 `level - 10`。
+ * \param level 日志等级. 1~5 对应 error/warn/ok/info/verbose. 大于10会开启WebRTC底层的日志(很多输出，影响性能)。
  */
 TiRTC_EXPORT void TiRtcLogSetLevel(int level);
 

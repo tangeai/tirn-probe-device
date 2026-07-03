@@ -19,7 +19,6 @@ static const uint32_t kLoopPollIntervalMs = 5;
 static const uint32_t kConnectionCleanupTimeoutMs = 5000;
 static const uint32_t kSdkStopTimeoutMs = 5000;
 static const size_t kMaxPathBytes = 1024;
-static const size_t kMaxLicenseBytes = 512;
 static const char kAudioFilePath[] = "assets/audio.g711a";
 static const char kVideoFilePath[] = "assets/video.h264";
 

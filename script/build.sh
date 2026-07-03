@@ -54,23 +54,10 @@ validate_sdk() {
 
   case "$platform" in
     macos-arm64)
-      require_file "$sdk_dir/lib/libTGTRP.a"
-      require_file "$sdk_dir/lib/libmbedtls.a"
-      require_file "$sdk_dir/lib/libmbedx509.a"
-      require_file "$sdk_dir/lib/libmbedcrypto.a"
+      require_file "$sdk_dir/lib/libTiRTC.dylib"
       require_file "$sdk_dir/lib/libtgrtc.dylib"
       ;;
-    linux-x86_64)
-      if [ -f "$sdk_dir/lib/libwebrtc.a" ] && [ -f "$sdk_dir/lib/libusrsctp.a" ]; then
-        :
-      elif [ ! -f "$sdk_dir/lib/libwebrtc_nosctp.a" ]; then
-        printf '[demo] missing required file: %s or %s\n' \
-          "$sdk_dir/lib/libwebrtc.a" \
-          "$sdk_dir/lib/libwebrtc_nosctp.a" >&2
-        exit 1
-      fi
-      require_file "$sdk_dir/lib/libmbedtls.a"
-      ;;
+    linux-x86_64) ;;
     *)
       printf '[demo] unsupported platform: %s\n' "$platform" >&2
       exit 1
@@ -88,20 +75,10 @@ sdk_complete() {
 
   case "$platform" in
     macos-arm64)
-      [ -f "$sdk_dir/lib/libTGTRP.a" ] || return 1
-      [ -f "$sdk_dir/lib/libmbedtls.a" ] || return 1
-      [ -f "$sdk_dir/lib/libmbedx509.a" ] || return 1
-      [ -f "$sdk_dir/lib/libmbedcrypto.a" ] || return 1
+      [ -f "$sdk_dir/lib/libTiRTC.dylib" ] || return 1
       [ -f "$sdk_dir/lib/libtgrtc.dylib" ] || return 1
       ;;
-    linux-x86_64)
-      if [ -f "$sdk_dir/lib/libwebrtc.a" ] && [ -f "$sdk_dir/lib/libusrsctp.a" ]; then
-        :
-      else
-        [ -f "$sdk_dir/lib/libwebrtc_nosctp.a" ] || return 1
-      fi
-      [ -f "$sdk_dir/lib/libmbedtls.a" ] || return 1
-      ;;
+    linux-x86_64) ;;
     *)
       return 1
       ;;

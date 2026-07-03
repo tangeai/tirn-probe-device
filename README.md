@@ -45,6 +45,7 @@ ESP32-S3 微信 IoT VoIP 设备端示例放在:
 
 ```text
 build/macos-arm64/device_uplink_demo
+build/macos-arm64/libTiRTC.dylib
 build/macos-arm64/libtgrtc.dylib
 build/linux-x86_64/device_uplink_demo
 ```

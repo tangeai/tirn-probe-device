@@ -37,7 +37,7 @@ detect_platform() {
 
 print_usage() {
   cat <<'USAGE'
-Usage: ./script/run_demo.sh --device-id <id> --device-secret-key <key>
+Usage: ./script/run_demo.sh [--endpoint <url>] --device-id <id> --device-secret-key <key>
 USAGE
 }
 
@@ -92,8 +92,8 @@ if [ ! -f "$binary" ]; then
   printf '%s\n' '[demo] run ./script/build.sh first' >&2
   exit 1
 fi
-
 if [ "$platform" = "macos-arm64" ]; then
+  require_file "$repo_root/build/$platform/libTiRTC.dylib"
   require_file "$repo_root/build/$platform/libtgrtc.dylib"
 fi
 

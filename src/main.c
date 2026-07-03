@@ -42,6 +42,7 @@ static device_demo_app_t g_app = {
     .cond = PTHREAD_COND_INITIALIZER,
 };
 static volatile sig_atomic_t g_should_exit = 0;
+static const char kClientIdSuffix[] = "-12345";
 
 static void log_message(FILE *stream, const char *fmt, ...)
 {
@@ -74,7 +75,7 @@ static void signal_handler(int signal_number)
 static void print_usage(const char *program_name)
 {
     fprintf(stderr,
-            "Usage: %s --device-id <id> --device-secret-key <key>\n",
+            "Usage: %s [--endpoint <url>] --device-id <id> --device-secret-key <key>\n",
             program_name);
 }
 
@@ -151,21 +152,23 @@ static int parse_arguments(int argc,
     return 0;
 }
 
-static int build_license(const device_demo_config_t *config,
-                         char *license_buffer,
-                         size_t license_buffer_size)
+static char *build_client_id(const char *device_id)
 {
-    int bytes_written = snprintf(license_buffer,
-                                 license_buffer_size,
-                                 "%s,%s",
-                                 config->device_id,
-                                 config->device_secret_key);
+    size_t device_id_len = strlen(device_id);
+    size_t suffix_len = strlen(kClientIdSuffix);
+    char *client_id;
 
-    if (bytes_written <= 0 || (size_t)bytes_written >= license_buffer_size) {
-        log_message(stderr, "failed to build device license string");
-        return -1;
+    if (device_id_len > SIZE_MAX - suffix_len - 1U) {
+        return NULL;
     }
-    return 0;
+
+    client_id = (char *)malloc(device_id_len + suffix_len + 1U);
+    if (client_id == NULL) {
+        return NULL;
+    }
+    memcpy(client_id, device_id, device_id_len);
+    memcpy(client_id + device_id_len, kClientIdSuffix, suffix_len + 1U);
+    return client_id;
 }
 
 static int make_deadline_ms(uint32_t timeout_ms, struct timespec *out_deadline)
@@ -535,9 +538,9 @@ static int wait_for_connection_cleanup(void)
 
 int main(int argc, char **argv)
 {
-    char license[kMaxLicenseBytes];
     device_demo_config_t config;
     device_demo_session_t *session_to_stop = NULL;
+    char *client_id = NULL;
     static const TIRTCCALLBACKS callbacks = {
         .on_event = on_event,
         .on_conn_accepted = on_conn_accepted,
@@ -564,7 +567,9 @@ int main(int argc, char **argv)
         validate_required_file(kVideoFilePath) != 0) {
         return 1;
     }
-    if (build_license(&config, license, sizeof(license)) != 0) {
+    client_id = build_client_id(config.device_id);
+    if (client_id == NULL) {
+        log_message(stderr, "failed to build client id");
         return 1;
     }
 
@@ -576,15 +581,35 @@ int main(int argc, char **argv)
                        &kSdkMaxSendBufferBytes,
                        sizeof(kSdkMaxSendBufferBytes)) != 0) {
         log_message(stderr, "failed to set SDK max send buffer");
+        free(client_id);
         return 1;
     }
     log_message(stdout, "SDK max send buffer set to %u bytes", kSdkMaxSendBufferBytes);
     if (TiRtcInit() != 0) {
         log_message(stderr, "TiRtcInit failed");
+        free(client_id);
         return 1;
     }
     TiRtcLogConfig(1, NULL, 0);
     TiRtcLogSetLevel((int)kSdkLogLevel);
+
+    if (TiRtcSetOption(TIRTC_OPT_DEVICE_SECRET_KEY,
+                       config.device_secret_key,
+                       (uint32_t)strlen(config.device_secret_key)) != 0) {
+        log_message(stderr, "failed to set device secret key");
+        TiRtcUninit();
+        free(client_id);
+        return 1;
+    }
+    if (TiRtcSetOption(TIRTC_OPT_CLIENT_ID,
+                       client_id,
+                       (uint32_t)strlen(client_id)) != 0) {
+        log_message(stderr, "failed to set client id");
+        TiRtcUninit();
+        free(client_id);
+        return 1;
+    }
+    log_message(stdout, "using client_id=%s", client_id);
 
     if (config.endpoint != NULL && config.endpoint[0] != '\0') {
         if (TiRtcSetOption(TIRTC_OPT_SERVICE_ENDPOINT,
@@ -592,6 +617,7 @@ int main(int argc, char **argv)
                            (uint32_t)strlen(config.endpoint)) != 0) {
             log_message(stderr, "failed to set service endpoint");
             TiRtcUninit();
+            free(client_id);
             return 1;
         }
         log_message(stdout, "using endpoint override: %s", config.endpoint);
@@ -600,9 +626,10 @@ int main(int argc, char **argv)
     log_message(stdout,
                 "starting device demo for device_id=%s",
                 config.device_id);
-    if (TiRtcStart(license, &callbacks) != 0) {
+    if (TiRtcStart(config.device_id, &callbacks) != 0) {
         log_message(stderr, "TiRtcStart failed");
         TiRtcUninit();
+        free(client_id);
         return 1;
     }
 
@@ -630,6 +657,7 @@ int main(int argc, char **argv)
     }
 
     TiRtcUninit();
+    free(client_id);
     log_message(stdout, "process exit");
     return 0;
 }
