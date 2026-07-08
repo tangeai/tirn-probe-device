@@ -23,6 +23,7 @@ endif
 
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/$(PLATFORM)/device_uplink_demo
+PROBE_TARGET := $(BUILD_DIR)/$(PLATFORM)/tirtc_accel_device_probe
 OBJ_DIR := $(BUILD_DIR)/$(PLATFORM)/obj
 SRC_DIR := src
 TIRTC_SDK_DIR := 3rd/$(PLATFORM)
@@ -34,6 +35,9 @@ SRCS := \
 	$(SRC_DIR)/device_demo_streamer.c
 
 OBJS := $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+PROBE_SRCS := \
+	$(SRC_DIR)/accel_device_probe.c
+PROBE_OBJS := $(PROBE_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 CPPFLAGS += -I$(SRC_DIR) -I$(TIRTC_INCLUDE_DIR)
 CFLAGS += -std=c11 -Wall -Wextra -Werror
 
@@ -50,9 +54,9 @@ ifeq ($(PLATFORM),linux-x86_64)
 LDLIBS := $(TIRTC_LIBS) -pthread -lm -ldl
 endif
 
-.PHONY: all clean clean-platform print-platform
+.PHONY: all probe clean clean-platform print-platform
 
-all: $(TARGET)
+all: $(TARGET) $(PROBE_TARGET)
 
 $(TARGET): $(OBJS) $(TIRTC_LIBS)
 	@mkdir -p $(dir $@)
@@ -60,6 +64,15 @@ $(TARGET): $(OBJS) $(TIRTC_LIBS)
 ifneq ($(strip $(TIRTC_RUNTIME_LIBS)),)
 	cp $(TIRTC_RUNTIME_LIBS) $(dir $@)
 endif
+
+$(PROBE_TARGET): $(PROBE_OBJS) $(TIRTC_LIBS)
+	@mkdir -p $(dir $@)
+	$(CC) $(PROBE_OBJS) $(LDLIBS) -o $@
+ifneq ($(strip $(TIRTC_RUNTIME_LIBS)),)
+	cp $(TIRTC_RUNTIME_LIBS) $(dir $@)
+endif
+
+probe: $(PROBE_TARGET)
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)

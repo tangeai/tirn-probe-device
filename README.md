@@ -45,10 +45,65 @@ ESP32-S3 微信 IoT VoIP 设备端示例放在:
 
 ```text
 build/macos-arm64/device_uplink_demo
+build/macos-arm64/tirtc_accel_device_probe
 build/macos-arm64/libTiRTC.dylib
 build/macos-arm64/libtgrtc.dylib
 build/linux-x86_64/device_uplink_demo
+build/linux-x86_64/tirtc_accel_device_probe
 ```
+
+## tirtc-accel 测试工具
+
+`tirtc_accel_device_probe` 是面向 `tirtc-accel/whip-echo-svc` 的 WHIP 测试 device 工具。它主动调用
+`TiRtcWhipConnect(peer_id, token, ...)`，因此需要业务侧提前提供 `whips://...` 形式的 `peer_id` 和连接
+`token`。如果 token 是一次性的，多次建连测试时由调用方保证 token 可用。
+
+### 建连成功率和耗时
+
+```sh
+./build/macos-arm64/tirtc_accel_device_probe connect \
+  --endpoint https://your-access.example.com \
+  --device-id your_device_id \
+  --device-secret-key your_device_secret_key \
+  --peer-id 'whips://whip-echo-svc?device_id=your_device_id' \
+  --token your_connect_token \
+  --iterations 10
+```
+
+输出包含建连成功率，以及成功建连耗时的 p50/p90/p95/p99。
+
+### 设备对时和设备到服务端延迟估算
+
+```sh
+./build/macos-arm64/tirtc_accel_device_probe timesync \
+  --endpoint https://your-access.example.com \
+  --device-id your_device_id \
+  --device-secret-key your_device_secret_key \
+  --peer-id 'whips://whip-echo-svc?device_id=your_device_id' \
+  --token your_connect_token \
+  --repeat 20 \
+  --interval-ms 100
+```
+
+工具会重复发送对时命令，由服务端返回收到命令时的服务端 UnixNano。设备端记录发送/收到响应的本地时间，
+估算设备时钟到服务端时钟的 offset，并输出 RTT、offset、设备到服务端延迟估算的 p50/p90/p95/p99。
+
+### 音频质量测试
+
+```sh
+./build/macos-arm64/tirtc_accel_device_probe audio \
+  --endpoint https://your-access.example.com \
+  --device-id your_device_id \
+  --device-secret-key your_device_secret_key \
+  --peer-id 'whips://whip-echo-svc?device_id=your_device_id' \
+  --token your_connect_token \
+  --duration-ms 10000 \
+  --frame-ms 20
+```
+
+音频测试开始前会先执行对时。测试期间设备发送带序号和发送时间的测试音频包，`whip-echo-svc` 回传服务端
+收到每个测试音频包的时间并继续 echo 音频。工具输出音频首包时间、音频卡顿率、设备到服务端音频延迟、
+服务端到设备 echo 延迟和端到端 echo 延迟的分位值。
 
 ## 脚本说明
 

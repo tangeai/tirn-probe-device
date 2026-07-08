@@ -39,7 +39,7 @@ print_usage() {
   cat <<'USAGE'
 Usage: ./script/build.sh [--platform macos-arm64|linux-x86_64]
 
-Builds the demo for the current native host platform.
+Builds the demo and accel probe tools for the current native host platform.
 Cross compilation is not supported by this script.
 USAGE
 }
@@ -135,8 +135,9 @@ if ! sdk_complete "$platform"; then
   validate_sdk "$platform"
 fi
 
-printf '[demo] building device_uplink_demo for %s\n' "$platform"
+printf '[demo] building device_uplink_demo and tirtc_accel_device_probe for %s\n' "$platform"
 cd "$repo_root"
 make PLATFORM="$platform" clean-platform
 make PLATFORM="$platform"
 printf '[demo] build output: %s\n' "$repo_root/build/$platform/device_uplink_demo"
+printf '[demo] build output: %s\n' "$repo_root/build/$platform/tirtc_accel_device_probe"
