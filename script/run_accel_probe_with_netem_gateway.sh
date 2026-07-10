@@ -8,6 +8,9 @@ uplink_network_name=${NETEM_UPLINK_NETWORK:-tirtc-netem-uplink}
 uplink_subnet=${NETEM_UPLINK_SUBNET:-172.32.0.0/24}
 gateway_ip=${NETEM_GATEWAY_IP:-172.31.0.2}
 probe_ip=${NETEM_PROBE_IP:-172.31.0.3}
+uplink_prefix=$(printf '%s\n' "$uplink_subnet" | awk -F'[./]' '{print $1"."$2"."$3}')
+gateway_uplink_ip=${NETEM_GATEWAY_UPLINK_IP:-$uplink_prefix.2}
+uplink_gateway_ip=${NETEM_UPLINK_GATEWAY_IP:-$uplink_prefix.1}
 gateway_name=${NETEM_GATEWAY_NAME:-tirtc-netem-gateway}
 probe_name=${NETEM_PROBE_NAME:-tirtc-netem-probe}
 
@@ -48,6 +51,8 @@ Optional environment variables:
   NETEM_UPLINK_SUBNET=172.32.0.0/24
   NETEM_GATEWAY_IP=172.31.0.2
   NETEM_PROBE_IP=172.31.0.3
+  NETEM_GATEWAY_UPLINK_IP=172.32.0.2
+  NETEM_UPLINK_GATEWAY_IP=172.32.0.1
   PING_HOST=wxvoip-test.tange365.com
   PING_COUNT=4
   LOSS=5
@@ -97,13 +102,16 @@ trap cleanup EXIT INT TERM
 printf '[netem-gateway] starting gateway: loss=%s%% delay=%sms gateway=%s probe=%s cpu=%s probe_net=%s uplink_net=%s\n' \
   "$loss" "$delay_ms" "$gateway_ip" "$probe_ip" "$cpu_limit" "$network_name" "$uplink_network_name"
 
-docker run -d --rm \
+docker run -d \
   --name "$gateway_name" \
-  --network "$uplink_network_name" \
+  --network "$network_name" \
+  --ip "$gateway_ip" \
   --cap-add NET_ADMIN \
   --sysctl net.ipv4.ip_forward=1 \
   -e PROBE_SUBNET="$subnet" \
   -e PROBE_IP="$probe_ip" \
+  -e GATEWAY_UPLINK_IP="$gateway_uplink_ip" \
+  -e UPLINK_GATEWAY_IP="$uplink_gateway_ip" \
   -e LOSS="$loss" \
   -e DELAY_MS="$delay_ms" \
   "$image" \
@@ -111,7 +119,8 @@ docker run -d --rm \
     while [ "$(find /sys/class/net -mindepth 1 -maxdepth 1 ! -name lo | wc -l)" -lt 2 ]; do
       sleep 0.1
     done
-    uplink_dev=$(ip route show default | awk "{print \$5; exit}")
+    uplink_dev=$(ip -o -4 addr show | awk -v uplink_ip="$GATEWAY_UPLINK_IP" "{split(\$4, a, \"/\"); if (a[1] == uplink_ip) {print \$2; exit}}")
+    ip route replace default via "$UPLINK_GATEWAY_IP" dev "$uplink_dev"
     iptables -t nat -A POSTROUTING -s "$PROBE_SUBNET" -o "$uplink_dev" -j MASQUERADE
     if [ "$LOSS" != "0" ] || [ "$DELAY_MS" != "0" ]; then
       tc qdisc replace dev "$uplink_dev" root netem loss "$LOSS"% delay "$DELAY_MS"ms
@@ -123,7 +132,9 @@ docker run -d --rm \
     tail -f /dev/null
   ' >/dev/null
 
-docker network connect --ip "$gateway_ip" "$network_name" "$gateway_name"
+docker network connect --ip "$gateway_uplink_ip" "$uplink_network_name" "$gateway_name"
+sleep 0.3
+docker logs "$gateway_name" || true
 
 docker run --rm \
   --name "$probe_name" \

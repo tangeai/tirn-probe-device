@@ -1029,7 +1029,11 @@ static int run_audio_iteration(probe_session_t *session,
                                sample_set_t *all_s2d_us,
                                sample_set_t *stutter_counts,
                                sample_set_t *stutter_time_us,
-                               sample_set_t *stutter_rate_ppm)
+                               sample_set_t *stutter_rate_ppm,
+                               uint64_t *total_sent,
+                               uint64_t *total_send_failed,
+                               uint64_t *total_server_observed,
+                               uint64_t *total_echo_received)
 {
     int64_t start_us;
     int64_t next_send_us;
@@ -1142,6 +1146,10 @@ static int run_audio_iteration(probe_session_t *session,
            session->audio.send_failed,
            d2s_us.len,
            session->audio.echo_count);
+    *total_sent += session->audio.send_count;
+    *total_send_failed += session->audio.send_failed;
+    *total_server_observed += (uint64_t)d2s_us.len;
+    *total_echo_received += session->audio.echo_count;
     {
         int64_t call_us = session->audio.call_finished_mono_us - session->audio.call_started_mono_us;
         double stutter_rate = call_us <= 0 ? 0.0 : (double)session->audio.stutter_time_us / (double)call_us;
@@ -1188,6 +1196,10 @@ static int run_audio_command(const probe_config_t *config)
     sample_set_t stutter_counts = {0};
     sample_set_t stutter_time_us = {0};
     sample_set_t stutter_rate_ppm = {0};
+    uint64_t total_sent = 0;
+    uint64_t total_send_failed = 0;
+    uint64_t total_server_observed = 0;
+    uint64_t total_echo_received = 0;
     int success = 0;
     int rc;
     int i;
@@ -1227,7 +1239,11 @@ static int run_audio_command(const probe_config_t *config)
                                      &all_s2d_us,
                                      &stutter_counts,
                                      &stutter_time_us,
-                                     &stutter_rate_ppm);
+                                     &stutter_rate_ppm,
+                                     &total_sent,
+                                     &total_send_failed,
+                                     &total_server_observed,
+                                     &total_echo_received);
         } else {
             log_message(stderr, "connect failed: %s", TiRtcGetErrorStr(rc));
         }
@@ -1241,7 +1257,16 @@ static int run_audio_command(const probe_config_t *config)
     }
 
     if (config->audio_iterations > 1) {
+        double server_observed_rate = total_sent == 0 ? 0.0 : (double)total_server_observed * 100.0 / (double)total_sent;
+        double echo_received_rate = total_sent == 0 ? 0.0 : (double)total_echo_received * 100.0 / (double)total_sent;
         printf("音频多轮汇总: 成功轮次=%d/%d\n", success, config->audio_iterations);
+        printf("音频包数多轮汇总: 设备发送=%" PRIu64 " 发送失败=%" PRIu64 " 服务端收到=%" PRIu64 " 设备收到回声=%" PRIu64 " 服务端收包率=%.2f%% 回声收包率=%.2f%%\n",
+               total_sent,
+               total_send_failed,
+               total_server_observed,
+               total_echo_received,
+               server_observed_rate,
+               echo_received_rate);
         print_duration_summary_ms_cn("音频首包上行延迟(设备到服务端)", &first_d2s_us);
         print_duration_summary_ms_cn("音频首包回声总延迟(设备发出到收到回声)", &first_echo_us);
         print_value_summary_cn("音频卡顿次数多轮汇总", &stutter_counts);
