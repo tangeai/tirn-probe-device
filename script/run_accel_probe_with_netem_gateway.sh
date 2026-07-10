@@ -116,10 +116,11 @@ docker run -d \
   -e DELAY_MS="$delay_ms" \
   "$image" \
   sh -eu -c '
-    while [ "$(find /sys/class/net -mindepth 1 -maxdepth 1 ! -name lo | wc -l)" -lt 2 ]; do
+    uplink_dev=
+    while [ -z "$uplink_dev" ]; do
       sleep 0.1
+      uplink_dev=$(ip -o -4 addr show | awk -v uplink_ip="$GATEWAY_UPLINK_IP" "{split(\$4, a, \"/\"); if (a[1] == uplink_ip) {print \$2; exit}}")
     done
-    uplink_dev=$(ip -o -4 addr show | awk -v uplink_ip="$GATEWAY_UPLINK_IP" "{split(\$4, a, \"/\"); if (a[1] == uplink_ip) {print \$2; exit}}")
     ip route replace default via "$UPLINK_GATEWAY_IP" dev "$uplink_dev"
     iptables -t nat -A POSTROUTING -s "$PROBE_SUBNET" -o "$uplink_dev" -j MASQUERADE
     if [ "$LOSS" != "0" ] || [ "$DELAY_MS" != "0" ]; then

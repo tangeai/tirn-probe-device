@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -36,6 +37,8 @@ enum {
     DEFAULT_LOG_LEVEL = 3,
     SDK_STOP_TIMEOUT_MS = 3000,
     DISCONNECT_TIMEOUT_MS = 3000,
+    CALLBACK_EVENT_RING_CAP = 2048,
+    CALLBACK_EVENT_DATA_BYTES = 2048,
 };
 
 static const uint32_t kSdkMaxSendBufferBytes = 2U * 1024U * 1024U;
@@ -130,11 +133,39 @@ typedef struct {
     audio_metrics_t audio;
 } probe_session_t;
 
+typedef enum {
+    CALLBACK_EVENT_SYSTEM,
+    CALLBACK_EVENT_CONNECT_RESULT,
+    CALLBACK_EVENT_CONN_ERROR,
+    CALLBACK_EVENT_DISCONNECTED,
+    CALLBACK_EVENT_COMMAND,
+    CALLBACK_EVENT_AUDIO,
+} callback_event_type_t;
+
+typedef struct callback_event {
+    callback_event_type_t type;
+    probe_session_t *session;
+    tirtc_conn_t hconn;
+    int event;
+    int error;
+    uint32_t cmdw;
+    uint32_t len;
+    TIRTCFRAMEINFO frame_info;
+    uint8_t data[CALLBACK_EVENT_DATA_BYTES];
+} callback_event_t;
+
 typedef struct {
     pthread_mutex_t mutex;
     pthread_cond_t cond;
+    pthread_t callback_worker;
+    callback_event_t event_ring[CALLBACK_EVENT_RING_CAP];
+    atomic_size_t event_read_index;
+    atomic_size_t event_write_index;
+    atomic_uint_fast64_t callback_events_dropped;
+    atomic_bool callback_worker_stop;
     int sdk_started;
     int sdk_stopped;
+    int callback_worker_running;
     probe_session_t *active_session;
 } probe_app_t;
 
@@ -183,6 +214,29 @@ static void sleep_for_us(int64_t duration_us)
     delay.tv_nsec = (long)(duration_us % 1000000LL) * 1000L;
     while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {
     }
+}
+
+static void sleep_until_monotonic_us(int64_t deadline_us)
+{
+#ifdef __linux__
+    struct timespec deadline;
+
+    if (deadline_us <= 0) {
+        return;
+    }
+    deadline.tv_sec = (time_t)(deadline_us / 1000000LL);
+    deadline.tv_nsec = (long)(deadline_us % 1000000LL) * 1000L;
+    while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, NULL) == EINTR) {
+    }
+#else
+    for (;;) {
+        int64_t now_us = monotonic_now_us();
+        if (now_us >= deadline_us) {
+            return;
+        }
+        sleep_for_us(deadline_us - now_us);
+    }
+#endif
 }
 
 static int make_deadline_ms(int timeout_ms, struct timespec *out_deadline)
@@ -499,6 +553,42 @@ static void signal_handler(int signo)
     g_should_exit = 1;
 }
 
+static int enqueue_callback_event(const callback_event_t *event)
+{
+    size_t write_index;
+    size_t read_index;
+    callback_event_t *slot;
+
+    if (event == NULL || atomic_load_explicit(&g_app.callback_worker_stop, memory_order_acquire)) {
+        return -1;
+    }
+    write_index = atomic_load_explicit(&g_app.event_write_index, memory_order_relaxed);
+    read_index = atomic_load_explicit(&g_app.event_read_index, memory_order_acquire);
+    if (write_index - read_index >= CALLBACK_EVENT_RING_CAP) {
+        atomic_fetch_add_explicit(&g_app.callback_events_dropped, 1, memory_order_relaxed);
+        return -1;
+    }
+    slot = &g_app.event_ring[write_index % CALLBACK_EVENT_RING_CAP];
+    *slot = *event;
+    atomic_store_explicit(&g_app.event_write_index, write_index + 1U, memory_order_release);
+    return 0;
+}
+
+static int dequeue_callback_event(callback_event_t *out_event)
+{
+    size_t read_index;
+    size_t write_index;
+
+    read_index = atomic_load_explicit(&g_app.event_read_index, memory_order_relaxed);
+    write_index = atomic_load_explicit(&g_app.event_write_index, memory_order_acquire);
+    if (read_index == write_index) {
+        return 0;
+    }
+    *out_event = g_app.event_ring[read_index % CALLBACK_EVENT_RING_CAP];
+    atomic_store_explicit(&g_app.event_read_index, read_index + 1U, memory_order_release);
+    return 1;
+}
+
 static probe_session_t *active_session_for_conn(tirtc_conn_t hconn)
 {
     probe_session_t *session = NULL;
@@ -515,11 +605,8 @@ static probe_session_t *active_session_for_conn(tirtc_conn_t hconn)
     return session;
 }
 
-static void on_event(int event, const void *data, int len)
+static void handle_event(int event)
 {
-    (void)data;
-    (void)len;
-
     pthread_mutex_lock(&g_app.mutex);
     if (event == TIRTC_EVENT_SYS_STARTED) {
         g_app.sdk_started = 1;
@@ -535,23 +622,24 @@ static void on_event(int event, const void *data, int len)
     }
 }
 
-static void on_connect_result(int error, tirtc_conn_t hconn, void *user_data)
+static void handle_connect_result(probe_session_t *session, int error, tirtc_conn_t hconn)
 {
-    probe_session_t *session = (probe_session_t *)user_data;
-
+    if (session == NULL) {
+        return;
+    }
+    if (error == 0 && hconn != NULL) {
+        (void)TiRtcConnSetUserData(hconn, session);
+    }
     pthread_mutex_lock(&session->mutex);
     session->connect_done = 1;
     session->connect_error = error;
     session->hconn = hconn;
     session->connect_cost_us = monotonic_now_us() - session->connect_started_us;
-    if (error == 0 && hconn != NULL) {
-        (void)TiRtcConnSetUserData(hconn, session);
-    }
     pthread_cond_broadcast(&session->cond);
     pthread_mutex_unlock(&session->mutex);
 }
 
-static void on_conn_error(tirtc_conn_t hconn, int error)
+static void handle_conn_error(tirtc_conn_t hconn, int error)
 {
     probe_session_t *session = active_session_for_conn(hconn);
 
@@ -565,7 +653,7 @@ static void on_conn_error(tirtc_conn_t hconn, int error)
     pthread_mutex_unlock(&session->mutex);
 }
 
-static void on_disconnected(tirtc_conn_t hconn)
+static void handle_disconnected(tirtc_conn_t hconn)
 {
     probe_session_t *session = active_session_for_conn(hconn);
 
@@ -578,7 +666,7 @@ static void on_disconnected(tirtc_conn_t hconn)
     pthread_mutex_unlock(&session->mutex);
 }
 
-static void on_command(tirtc_conn_t hconn, uint32_t cmdw, const void *data, uint32_t len)
+static void handle_command(tirtc_conn_t hconn, uint32_t cmdw, const void *data, uint32_t len)
 {
     probe_session_t *session = active_session_for_conn(hconn);
     char *json;
@@ -630,7 +718,7 @@ static void on_command(tirtc_conn_t hconn, uint32_t cmdw, const void *data, uint
     free(json);
 }
 
-static void on_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *data)
+static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *data)
 {
     probe_session_t *session = active_session_for_conn(hconn);
     uint32_t frame_ts_ms;
@@ -674,6 +762,171 @@ static void on_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *data)
         session->audio.last_echo_recv_mono_us = now_mono_us;
     }
     pthread_mutex_unlock(&session->mutex);
+}
+
+static void *callback_worker_main(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        callback_event_t event;
+        if (!dequeue_callback_event(&event)) {
+            if (atomic_load_explicit(&g_app.callback_worker_stop, memory_order_acquire) &&
+                atomic_load_explicit(&g_app.event_read_index, memory_order_acquire) ==
+                    atomic_load_explicit(&g_app.event_write_index, memory_order_acquire)) {
+                break;
+            }
+            sleep_for_us(1000LL);
+            continue;
+        }
+
+        switch (event.type) {
+            case CALLBACK_EVENT_SYSTEM:
+                handle_event(event.event);
+                break;
+            case CALLBACK_EVENT_CONNECT_RESULT:
+                handle_connect_result(event.session, event.error, event.hconn);
+                break;
+            case CALLBACK_EVENT_CONN_ERROR:
+                handle_conn_error(event.hconn, event.error);
+                break;
+            case CALLBACK_EVENT_DISCONNECTED:
+                handle_disconnected(event.hconn);
+                break;
+            case CALLBACK_EVENT_COMMAND:
+                handle_command(event.hconn, event.cmdw, event.data, event.len);
+                break;
+            case CALLBACK_EVENT_AUDIO:
+                handle_audio(event.hconn, &event.frame_info, event.data);
+                break;
+        }
+    }
+    return NULL;
+}
+
+static int callback_worker_start(void)
+{
+    int rc;
+
+    atomic_store_explicit(&g_app.event_read_index, 0, memory_order_release);
+    atomic_store_explicit(&g_app.event_write_index, 0, memory_order_release);
+    atomic_store_explicit(&g_app.callback_events_dropped, 0, memory_order_release);
+    atomic_store_explicit(&g_app.callback_worker_stop, false, memory_order_release);
+
+    rc = pthread_create(&g_app.callback_worker, NULL, callback_worker_main, NULL);
+    if (rc != 0) {
+        return -1;
+    }
+    pthread_mutex_lock(&g_app.mutex);
+    g_app.callback_worker_running = 1;
+    pthread_mutex_unlock(&g_app.mutex);
+    return 0;
+}
+
+static void callback_worker_stop(void)
+{
+    int should_join;
+    uint64_t dropped;
+
+    pthread_mutex_lock(&g_app.mutex);
+    should_join = g_app.callback_worker_running;
+    atomic_store_explicit(&g_app.callback_worker_stop, true, memory_order_release);
+    pthread_cond_broadcast(&g_app.cond);
+    pthread_mutex_unlock(&g_app.mutex);
+
+    if (should_join) {
+        pthread_join(g_app.callback_worker, NULL);
+    }
+
+    pthread_mutex_lock(&g_app.mutex);
+    g_app.callback_worker_running = 0;
+    pthread_mutex_unlock(&g_app.mutex);
+
+    dropped = atomic_load_explicit(&g_app.callback_events_dropped, memory_order_acquire);
+    if (dropped > 0) {
+        log_message(stderr, "callback events dropped=%" PRIu64, dropped);
+    }
+}
+
+static void on_event(int event, const void *data, int len)
+{
+    callback_event_t queued;
+
+    (void)data;
+    (void)len;
+    memset(&queued, 0, sizeof(queued));
+    queued.type = CALLBACK_EVENT_SYSTEM;
+    queued.event = event;
+    (void)enqueue_callback_event(&queued);
+}
+
+static void on_connect_result(int error, tirtc_conn_t hconn, void *user_data)
+{
+    callback_event_t event;
+
+    memset(&event, 0, sizeof(event));
+    event.type = CALLBACK_EVENT_CONNECT_RESULT;
+    event.session = (probe_session_t *)user_data;
+    event.error = error;
+    event.hconn = hconn;
+    (void)enqueue_callback_event(&event);
+}
+
+static void on_conn_error(tirtc_conn_t hconn, int error)
+{
+    callback_event_t event;
+
+    memset(&event, 0, sizeof(event));
+    event.type = CALLBACK_EVENT_CONN_ERROR;
+    event.hconn = hconn;
+    event.error = error;
+    (void)enqueue_callback_event(&event);
+}
+
+static void on_disconnected(tirtc_conn_t hconn)
+{
+    callback_event_t event;
+
+    memset(&event, 0, sizeof(event));
+    event.type = CALLBACK_EVENT_DISCONNECTED;
+    event.hconn = hconn;
+    (void)enqueue_callback_event(&event);
+}
+
+static void on_command(tirtc_conn_t hconn, uint32_t cmdw, const void *data, uint32_t len)
+{
+    callback_event_t event;
+
+    if ((data == NULL && len > 0) || len > CALLBACK_EVENT_DATA_BYTES) {
+        atomic_fetch_add_explicit(&g_app.callback_events_dropped, 1, memory_order_relaxed);
+        return;
+    }
+    memset(&event, 0, sizeof(event));
+    event.type = CALLBACK_EVENT_COMMAND;
+    event.hconn = hconn;
+    event.cmdw = cmdw;
+    event.len = len;
+    if (len > 0) {
+        memcpy(event.data, data, len);
+    }
+    (void)enqueue_callback_event(&event);
+}
+
+static void on_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *data)
+{
+    callback_event_t event;
+
+    if (info == NULL || data == NULL || info->length == 0 || info->length > CALLBACK_EVENT_DATA_BYTES) {
+        atomic_fetch_add_explicit(&g_app.callback_events_dropped, 1, memory_order_relaxed);
+        return;
+    }
+    memset(&event, 0, sizeof(event));
+    event.type = CALLBACK_EVENT_AUDIO;
+    event.hconn = hconn;
+    event.frame_info = *info;
+    event.len = info->length;
+    memcpy(event.data, data, info->length);
+    (void)enqueue_callback_event(&event);
 }
 
 static const TIRTCCALLBACKS g_callbacks = {
@@ -1102,7 +1355,7 @@ static int run_audio_iteration(probe_session_t *session,
             }
             next_send_us += (int64_t)config->frame_ms * 1000LL;
         } else {
-            sleep_for_us(next_send_us - now_us);
+            sleep_until_monotonic_us(next_send_us);
         }
     }
     sleep_for_us(1000000LL);
@@ -1461,13 +1714,24 @@ static int sdk_start(const probe_config_t *config)
     }
     free(client_id);
 
+    pthread_mutex_lock(&g_app.mutex);
+    g_app.sdk_started = 0;
+    g_app.sdk_stopped = 0;
+    pthread_mutex_unlock(&g_app.mutex);
+    if (callback_worker_start() != 0) {
+        TiRtcUninit();
+        return -1;
+    }
+
     rc = TiRtcStart(config->device_id, &g_callbacks);
     if (rc != 0) {
+        callback_worker_stop();
         TiRtcUninit();
         return rc;
     }
     if (wait_for_sdk_started(config->connect_timeout_ms) != 0) {
         (void)TiRtcStop();
+        callback_worker_stop();
         TiRtcUninit();
         return TIRTC_E_TIMEOUTED;
     }
@@ -1482,6 +1746,7 @@ static void sdk_stop(void)
     if (wait_for_sdk_stopped(SDK_STOP_TIMEOUT_MS) != 0) {
         log_message(stderr, "timed out waiting for SDK stop");
     }
+    callback_worker_stop();
     TiRtcUninit();
 }
 
