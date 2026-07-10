@@ -98,7 +98,7 @@ build/linux-x86_64/tirtc_accel_device_probe
   --peer-id 'whips://whip-echo-svc?device_id=your_device_id' \
   --token your_connect_token \
   --duration-ms 10000 \
-  --frame-ms 20
+  --frame-ms 40
 ```
 
 音频测试开始前会先执行对时。测试期间设备发送带序号和发送时间的测试音频包，`whip-echo-svc` 回传服务端

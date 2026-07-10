@@ -27,7 +27,7 @@ timesync_interval_ms=${TIMESYNC_INTERVAL_MS:-100}
 timesync_timeout_ms=${TIMESYNC_TIMEOUT_MS:-1000}
 audio_iterations=${AUDIO_ITERATIONS:-20}
 duration_ms=${DURATION_MS:-10000}
-frame_ms=${FRAME_MS:-20}
+frame_ms=${FRAME_MS:-40}
 audio_timesync_repeat=${AUDIO_TIMESYNC_REPEAT:-$timesync_repeat}
 tcpdump=${TCPDUMP:-0}
 tcpdump_filter=${TCPDUMP_FILTER:-udp or tcp}
@@ -69,7 +69,7 @@ Optional environment variables:
   TIMESYNC_TIMEOUT_MS=1000
   AUDIO_ITERATIONS=20
   DURATION_MS=10000
-  FRAME_MS=20
+  FRAME_MS=40
   AUDIO_TIMESYNC_REPEAT=20
   TCPDUMP=0|1
   TCPDUMP_FILTER="udp or tcp"
