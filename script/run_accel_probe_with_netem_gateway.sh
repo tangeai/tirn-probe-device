@@ -2,8 +2,10 @@
 set -eu
 
 image=${PROBE_IMAGE:-docker-hub.tange365.com/runtime/tirtc-accel-probe-runner:test}
-network_name=${NETEM_NETWORK:-tirtc-netem}
+network_name=${NETEM_NETWORK:-tirtc-netem-probe}
 subnet=${NETEM_SUBNET:-172.31.0.0/24}
+uplink_network_name=${NETEM_UPLINK_NETWORK:-tirtc-netem-uplink}
+uplink_subnet=${NETEM_UPLINK_SUBNET:-172.32.0.0/24}
 gateway_ip=${NETEM_GATEWAY_IP:-172.31.0.2}
 probe_ip=${NETEM_PROBE_IP:-172.31.0.3}
 gateway_name=${NETEM_GATEWAY_NAME:-tirtc-netem-gateway}
@@ -40,8 +42,10 @@ Usage:
 
 Optional environment variables:
   PROBE_IMAGE=docker-hub.tange365.com/runtime/tirtc-accel-probe-runner:test
-  NETEM_NETWORK=tirtc-netem
+  NETEM_NETWORK=tirtc-netem-probe
   NETEM_SUBNET=172.31.0.0/24
+  NETEM_UPLINK_NETWORK=tirtc-netem-uplink
+  NETEM_UPLINK_SUBNET=172.32.0.0/24
   NETEM_GATEWAY_IP=172.31.0.2
   NETEM_PROBE_IP=172.31.0.3
   PING_HOST=wxvoip-test.tange365.com
@@ -83,30 +87,43 @@ require_value TOKEN "$token"
 if ! docker network inspect "$network_name" >/dev/null 2>&1; then
   docker network create --subnet "$subnet" "$network_name" >/dev/null
 fi
+if ! docker network inspect "$uplink_network_name" >/dev/null 2>&1; then
+  docker network create --subnet "$uplink_subnet" "$uplink_network_name" >/dev/null
+fi
 
 cleanup
 trap cleanup EXIT INT TERM
 
-printf '[netem-gateway] starting gateway: loss=%s%% delay=%sms gateway=%s probe=%s cpu=%s\n' \
-  "$loss" "$delay_ms" "$gateway_ip" "$probe_ip" "$cpu_limit"
+printf '[netem-gateway] starting gateway: loss=%s%% delay=%sms gateway=%s probe=%s cpu=%s probe_net=%s uplink_net=%s\n' \
+  "$loss" "$delay_ms" "$gateway_ip" "$probe_ip" "$cpu_limit" "$network_name" "$uplink_network_name"
 
 docker run -d --rm \
   --name "$gateway_name" \
-  --network "$network_name" \
-  --ip "$gateway_ip" \
+  --network "$uplink_network_name" \
   --cap-add NET_ADMIN \
   --sysctl net.ipv4.ip_forward=1 \
+  -e PROBE_SUBNET="$subnet" \
   -e PROBE_IP="$probe_ip" \
   -e LOSS="$loss" \
   -e DELAY_MS="$delay_ms" \
   "$image" \
   sh -eu -c '
-    iptables -t nat -A POSTROUTING -s "$PROBE_IP"/32 -j MASQUERADE
+    while [ "$(find /sys/class/net -mindepth 1 -maxdepth 1 ! -name lo | wc -l)" -lt 2 ]; do
+      sleep 0.1
+    done
+    uplink_dev=$(ip route show default | awk "{print \$5; exit}")
+    iptables -t nat -A POSTROUTING -s "$PROBE_SUBNET" -o "$uplink_dev" -j MASQUERADE
     if [ "$LOSS" != "0" ] || [ "$DELAY_MS" != "0" ]; then
-      tc qdisc add dev eth0 root netem loss "$LOSS"% delay "$DELAY_MS"ms
+      tc qdisc replace dev "$uplink_dev" root netem loss "$LOSS"% delay "$DELAY_MS"ms
     fi
+    printf "[netem-gateway] gateway route table:\n"
+    ip route
+    printf "[netem-gateway] netem device: %s\n" "$uplink_dev"
+    tc qdisc show dev "$uplink_dev"
     tail -f /dev/null
   ' >/dev/null
+
+docker network connect --ip "$gateway_ip" "$network_name" "$gateway_name"
 
 docker run --rm \
   --name "$probe_name" \
@@ -135,11 +152,20 @@ docker run --rm \
   "$image" \
   sh -eu -c '
     ip route replace default via "$GATEWAY_IP"
+    printf "[netem-gateway] probe route table:\n"
+    ip route
+    ping_ip=$(getent hosts "$PING_HOST" | awk "{print \$1; exit}" || true)
+    if [ -n "$ping_ip" ]; then
+      printf "[netem-gateway] probe route to ping host %s (%s):\n" "$PING_HOST" "$ping_ip"
+      ip route get "$ping_ip" || true
+    fi
     printf "[netem-gateway] ping before test: host=%s count=%s\n" "$PING_HOST" "$PING_COUNT"
     ping -c "$PING_COUNT" "$PING_HOST" || true
 
     case "$COMMAND" in
       audio)
+        printf "[netem-gateway] probe command: /usr/local/bin/tirtc_accel_device_probe audio --endpoint %s --device-id %s --device-secret-key *** --peer-id %s --token *** --repeat %s --interval-ms %s --timeout-ms %s --audio-iterations %s --duration-ms %s --frame-ms %s\n" \
+          "$ENDPOINT" "$DEVICE_ID" "$PEER_ID" "$AUDIO_TIMESYNC_REPEAT" "$TIMESYNC_INTERVAL_MS" "$TIMESYNC_TIMEOUT_MS" "$AUDIO_ITERATIONS" "$DURATION_MS" "$FRAME_MS"
         exec /usr/local/bin/tirtc_accel_device_probe audio \
           --endpoint "$ENDPOINT" \
           --device-id "$DEVICE_ID" \
@@ -147,11 +173,15 @@ docker run --rm \
           --peer-id "$PEER_ID" \
           --token "$TOKEN" \
           --repeat "$AUDIO_TIMESYNC_REPEAT" \
+          --interval-ms "$TIMESYNC_INTERVAL_MS" \
+          --timeout-ms "$TIMESYNC_TIMEOUT_MS" \
           --audio-iterations "$AUDIO_ITERATIONS" \
           --duration-ms "$DURATION_MS" \
           --frame-ms "$FRAME_MS"
         ;;
       connect)
+        printf "[netem-gateway] probe command: /usr/local/bin/tirtc_accel_device_probe connect --endpoint %s --device-id %s --device-secret-key *** --peer-id %s --token *** --iterations %s --connect-timeout-ms %s\n" \
+          "$ENDPOINT" "$DEVICE_ID" "$PEER_ID" "$CONNECT_ITERATIONS" "$CONNECT_TIMEOUT_MS"
         exec /usr/local/bin/tirtc_accel_device_probe connect \
           --endpoint "$ENDPOINT" \
           --device-id "$DEVICE_ID" \
@@ -162,6 +192,8 @@ docker run --rm \
           --connect-timeout-ms "$CONNECT_TIMEOUT_MS"
         ;;
       timesync)
+        printf "[netem-gateway] probe command: /usr/local/bin/tirtc_accel_device_probe timesync --endpoint %s --device-id %s --device-secret-key *** --peer-id %s --token *** --repeat %s --interval-ms %s --timeout-ms %s\n" \
+          "$ENDPOINT" "$DEVICE_ID" "$PEER_ID" "$TIMESYNC_REPEAT" "$TIMESYNC_INTERVAL_MS" "$TIMESYNC_TIMEOUT_MS"
         exec /usr/local/bin/tirtc_accel_device_probe timesync \
           --endpoint "$ENDPOINT" \
           --device-id "$DEVICE_ID" \
