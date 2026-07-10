@@ -86,11 +86,14 @@ typedef struct {
 } time_sync_sample_t;
 
 typedef struct {
+    uint32_t send_index;
     uint32_t frame_ts_ms;
     int64_t client_send_unix_ns;
     int64_t client_send_mono_us;
+    int64_t send_late_us;
     int64_t client_echo_recv_mono_us;
     int64_t server_recv_unix_ns;
+    int send_ret;
     int observed;
     int echoed;
 } audio_sample_t;
@@ -108,7 +111,9 @@ typedef struct {
     int64_t stutter_time_us;
     int64_t call_started_mono_us;
     int64_t call_finished_mono_us;
+    int64_t max_send_late_us;
     int expected_frame_ms;
+    uint64_t late_send_count;
     uint64_t stutter_count;
     uint64_t send_count;
     uint64_t send_failed;
@@ -501,7 +506,12 @@ static audio_sample_t *audio_metrics_find(audio_metrics_t *metrics, uint32_t fra
     return NULL;
 }
 
-static audio_sample_t *audio_metrics_append(audio_metrics_t *metrics, uint32_t frame_ts_ms, int64_t send_unix_ns, int64_t send_mono_us)
+static audio_sample_t *audio_metrics_append(audio_metrics_t *metrics,
+                                            uint32_t send_index,
+                                            uint32_t frame_ts_ms,
+                                            int64_t send_unix_ns,
+                                            int64_t send_mono_us,
+                                            int64_t send_late_us)
 {
     audio_sample_t *new_items;
     size_t new_cap;
@@ -518,10 +528,94 @@ static audio_sample_t *audio_metrics_append(audio_metrics_t *metrics, uint32_t f
     }
     sample = &metrics->items[metrics->len++];
     memset(sample, 0, sizeof(*sample));
+    sample->send_index = send_index;
     sample->frame_ts_ms = frame_ts_ms;
     sample->client_send_unix_ns = send_unix_ns;
     sample->client_send_mono_us = send_mono_us;
+    sample->send_late_us = send_late_us;
+    sample->send_ret = 0;
     return sample;
+}
+
+static void print_missing_audio_ranges(const char *label, const audio_metrics_t *metrics, int observed_field)
+{
+    int in_range = 0;
+    uint32_t range_start = 0;
+    uint32_t range_end = 0;
+    int printed = 0;
+    size_t i;
+
+    printf("%s: ", label);
+    for (i = 0; i < metrics->len; ++i) {
+        const audio_sample_t *sample = &metrics->items[i];
+        int present = observed_field ? sample->observed : sample->echoed;
+        if (!present) {
+            if (!in_range) {
+                range_start = sample->send_index;
+                in_range = 1;
+            }
+            range_end = sample->send_index;
+            continue;
+        }
+        if (in_range) {
+            printf("%s%u", printed ? "," : "", range_start);
+            if (range_end != range_start) {
+                printf("-%u", range_end);
+            }
+            printed = 1;
+            in_range = 0;
+        }
+    }
+    if (in_range) {
+        printf("%s%u", printed ? "," : "", range_start);
+        if (range_end != range_start) {
+            printf("-%u", range_end);
+        }
+        printed = 1;
+    }
+    if (!printed) {
+        printf("无");
+    }
+    printf("\n");
+}
+
+static void print_missing_audio_details(const char *label, const audio_metrics_t *metrics, int observed_field)
+{
+    size_t i;
+    size_t printed = 0;
+    size_t missing_count = 0;
+    const size_t max_print = 80U;
+
+    for (i = 0; i < metrics->len; ++i) {
+        const audio_sample_t *sample = &metrics->items[i];
+        int present = observed_field ? sample->observed : sample->echoed;
+        if (!present) {
+            missing_count++;
+        }
+    }
+    if (missing_count == 0) {
+        return;
+    }
+
+    printf("%s: 缺失数=%zu", label, missing_count);
+    for (i = 0; i < metrics->len && printed < max_print; ++i) {
+        const audio_sample_t *sample = &metrics->items[i];
+        int present = observed_field ? sample->observed : sample->echoed;
+        if (present) {
+            continue;
+        }
+        printf(" #%u(send_unix=%.6f, since_start=%.2fms, late=%.2fms, send_ret=%d)",
+               sample->send_index,
+               ns_to_s(sample->client_send_unix_ns),
+               us_to_ms(sample->client_send_mono_us - metrics->call_started_mono_us),
+               us_to_ms(sample->send_late_us),
+               sample->send_ret);
+        printed++;
+    }
+    if (missing_count > printed) {
+        printf(" ... 省略=%zu", missing_count - printed);
+    }
+    printf("\n");
 }
 
 static void audio_metrics_free(audio_metrics_t *metrics)
@@ -1290,6 +1384,7 @@ static int run_audio_iteration(probe_session_t *session,
 {
     int64_t start_us;
     int64_t next_send_us;
+    uint32_t base_ts_ms;
     sample_set_t d2s_us = {0};
     sample_set_t echo_us = {0};
     sample_set_t s2d_us = {0};
@@ -1308,6 +1403,7 @@ static int run_audio_iteration(probe_session_t *session,
 
     start_us = monotonic_now_us();
     next_send_us = start_us;
+    base_ts_ms = (uint32_t)(realtime_now_ns() / 1000000LL);
     pthread_mutex_lock(&session->mutex);
     audio_metrics_reset_iteration(&session->audio);
     session->audio.call_started_mono_us = start_us;
@@ -1324,15 +1420,28 @@ static int run_audio_iteration(probe_session_t *session,
             uint32_t frame_index;
             int64_t send_unix_ns = realtime_now_ns();
             int64_t send_mono_us = monotonic_now_us();
+            int64_t send_late_us = now_us - next_send_us;
             int send_ret;
 
             pthread_mutex_lock(&session->mutex);
             frame_index = ++session->audio.next_frame_index;
-            frame_ts_ms = (uint32_t)(send_unix_ns / 1000000LL);
+            frame_ts_ms = base_ts_ms +
+                (frame_index - 1U) * (uint32_t)config->frame_ms;
             if (session->audio.first_client_send_unix_ns == 0) {
                 session->audio.first_client_send_unix_ns = send_unix_ns;
             }
-            if (audio_metrics_append(&session->audio, frame_ts_ms, send_unix_ns, send_mono_us) == NULL) {
+            if (send_late_us > session->audio.max_send_late_us) {
+                session->audio.max_send_late_us = send_late_us;
+            }
+            if (send_late_us > (int64_t)config->frame_ms * 1000LL) {
+                session->audio.late_send_count++;
+            }
+            if (audio_metrics_append(&session->audio,
+                                     frame_index,
+                                     frame_ts_ms,
+                                     send_unix_ns,
+                                     send_mono_us,
+                                     send_late_us) == NULL) {
                 pthread_mutex_unlock(&session->mutex);
                 log_message(stderr, "failed to record audio sample");
                 break;
@@ -1348,11 +1457,17 @@ static int run_audio_iteration(probe_session_t *session,
             info.ts = frame_ts_ms;
             info.length = AUDIO_PAYLOAD_BYTES;
             send_ret = TiRtcSendAudioStream(session->hconn, &info, payload);
-            if (send_ret < 0) {
-                pthread_mutex_lock(&session->mutex);
-                session->audio.send_failed++;
-                pthread_mutex_unlock(&session->mutex);
+            pthread_mutex_lock(&session->mutex);
+            {
+                audio_sample_t *sample = audio_metrics_find(&session->audio, frame_ts_ms);
+                if (sample != NULL) {
+                    sample->send_ret = send_ret;
+                }
             }
+            if (send_ret < 0) {
+                session->audio.send_failed++;
+            }
+            pthread_mutex_unlock(&session->mutex);
             next_send_us += (int64_t)config->frame_ms * 1000LL;
         } else {
             sleep_until_monotonic_us(next_send_us);
@@ -1399,6 +1514,15 @@ static int run_audio_iteration(probe_session_t *session,
            session->audio.send_failed,
            d2s_us.len,
            session->audio.echo_count);
+    printf("音频发送调度: 最大延迟=%.2fms 超过一帧间隔次数=%" PRIu64 "\n",
+           us_to_ms(session->audio.max_send_late_us),
+           session->audio.late_send_count);
+    if (d2s_us.len != session->audio.len || session->audio.echo_count != session->audio.len) {
+        print_missing_audio_ranges("音频服务端未收到包序号", &session->audio, 1);
+        print_missing_audio_ranges("音频设备未收到回声包序号", &session->audio, 0);
+        print_missing_audio_details("音频服务端未收到包明细", &session->audio, 1);
+        print_missing_audio_details("音频设备未收到回声包明细", &session->audio, 0);
+    }
     *total_sent += session->audio.send_count;
     *total_send_failed += session->audio.send_failed;
     *total_server_observed += (uint64_t)d2s_us.len;

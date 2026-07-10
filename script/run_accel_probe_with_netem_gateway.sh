@@ -29,6 +29,9 @@ audio_iterations=${AUDIO_ITERATIONS:-20}
 duration_ms=${DURATION_MS:-10000}
 frame_ms=${FRAME_MS:-20}
 audio_timesync_repeat=${AUDIO_TIMESYNC_REPEAT:-$timesync_repeat}
+tcpdump=${TCPDUMP:-0}
+tcpdump_filter=${TCPDUMP_FILTER:-udp or tcp}
+tcpdump_snaplen=${TCPDUMP_SNAPLEN:-160}
 
 endpoint=${ENDPOINT:-}
 device_id=${DEVICE_ID:-}
@@ -68,6 +71,9 @@ Optional environment variables:
   DURATION_MS=10000
   FRAME_MS=20
   AUDIO_TIMESYNC_REPEAT=20
+  TCPDUMP=0|1
+  TCPDUMP_FILTER="udp or tcp"
+  TCPDUMP_SNAPLEN=160
 USAGE
 }
 
@@ -161,8 +167,20 @@ docker run --rm \
   -e DURATION_MS="$duration_ms" \
   -e FRAME_MS="$frame_ms" \
   -e AUDIO_TIMESYNC_REPEAT="$audio_timesync_repeat" \
+  -e TCPDUMP="$tcpdump" \
+  -e TCPDUMP_FILTER="$tcpdump_filter" \
+  -e TCPDUMP_SNAPLEN="$tcpdump_snaplen" \
   "$image" \
   sh -eu -c '
+    tcpdump_pid=
+    cleanup_probe() {
+      if [ -n "$tcpdump_pid" ]; then
+        kill "$tcpdump_pid" >/dev/null 2>&1 || true
+        wait "$tcpdump_pid" >/dev/null 2>&1 || true
+      fi
+    }
+    trap cleanup_probe EXIT INT TERM
+
     ip route replace default via "$GATEWAY_IP"
     printf "[netem-gateway] probe route table:\n"
     ip route
@@ -174,11 +192,23 @@ docker run --rm \
     printf "[netem-gateway] ping before test: host=%s count=%s\n" "$PING_HOST" "$PING_COUNT"
     ping -c "$PING_COUNT" "$PING_HOST" || true
 
+    if [ "$TCPDUMP" = "1" ]; then
+      if ! command -v tcpdump >/dev/null 2>&1; then
+        printf "[netem-gateway] tcpdump requested but not found in image\n" >&2
+      else
+        printf "[netem-gateway] tcpdump start: iface=eth0 snaplen=%s filter=%s\n" "$TCPDUMP_SNAPLEN" "$TCPDUMP_FILTER"
+        # shellcheck disable=SC2086
+        tcpdump -i eth0 -nn -tttt -s "$TCPDUMP_SNAPLEN" -l $TCPDUMP_FILTER &
+        tcpdump_pid=$!
+        sleep 0.5
+      fi
+    fi
+
     case "$COMMAND" in
       audio)
         printf "[netem-gateway] probe command: /usr/local/bin/tirtc_accel_device_probe audio --endpoint %s --device-id %s --device-secret-key *** --peer-id %s --token *** --repeat %s --interval-ms %s --timeout-ms %s --audio-iterations %s --duration-ms %s --frame-ms %s\n" \
           "$ENDPOINT" "$DEVICE_ID" "$PEER_ID" "$AUDIO_TIMESYNC_REPEAT" "$TIMESYNC_INTERVAL_MS" "$TIMESYNC_TIMEOUT_MS" "$AUDIO_ITERATIONS" "$DURATION_MS" "$FRAME_MS"
-        exec /usr/local/bin/tirtc_accel_device_probe audio \
+        /usr/local/bin/tirtc_accel_device_probe audio \
           --endpoint "$ENDPOINT" \
           --device-id "$DEVICE_ID" \
           --device-secret-key "$DEVICE_SECRET_KEY" \
@@ -190,11 +220,12 @@ docker run --rm \
           --audio-iterations "$AUDIO_ITERATIONS" \
           --duration-ms "$DURATION_MS" \
           --frame-ms "$FRAME_MS"
+        exit $?
         ;;
       connect)
         printf "[netem-gateway] probe command: /usr/local/bin/tirtc_accel_device_probe connect --endpoint %s --device-id %s --device-secret-key *** --peer-id %s --token *** --iterations %s --connect-timeout-ms %s\n" \
           "$ENDPOINT" "$DEVICE_ID" "$PEER_ID" "$CONNECT_ITERATIONS" "$CONNECT_TIMEOUT_MS"
-        exec /usr/local/bin/tirtc_accel_device_probe connect \
+        /usr/local/bin/tirtc_accel_device_probe connect \
           --endpoint "$ENDPOINT" \
           --device-id "$DEVICE_ID" \
           --device-secret-key "$DEVICE_SECRET_KEY" \
@@ -202,11 +233,12 @@ docker run --rm \
           --token "$TOKEN" \
           --iterations "$CONNECT_ITERATIONS" \
           --connect-timeout-ms "$CONNECT_TIMEOUT_MS"
+        exit $?
         ;;
       timesync)
         printf "[netem-gateway] probe command: /usr/local/bin/tirtc_accel_device_probe timesync --endpoint %s --device-id %s --device-secret-key *** --peer-id %s --token *** --repeat %s --interval-ms %s --timeout-ms %s\n" \
           "$ENDPOINT" "$DEVICE_ID" "$PEER_ID" "$TIMESYNC_REPEAT" "$TIMESYNC_INTERVAL_MS" "$TIMESYNC_TIMEOUT_MS"
-        exec /usr/local/bin/tirtc_accel_device_probe timesync \
+        /usr/local/bin/tirtc_accel_device_probe timesync \
           --endpoint "$ENDPOINT" \
           --device-id "$DEVICE_ID" \
           --device-secret-key "$DEVICE_SECRET_KEY" \
@@ -215,6 +247,7 @@ docker run --rm \
           --repeat "$TIMESYNC_REPEAT" \
           --interval-ms "$TIMESYNC_INTERVAL_MS" \
           --timeout-ms "$TIMESYNC_TIMEOUT_MS"
+        exit $?
         ;;
       *)
         printf "unsupported COMMAND: %s\n" "$COMMAND" >&2
