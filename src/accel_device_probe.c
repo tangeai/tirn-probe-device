@@ -35,6 +35,7 @@ enum {
     DEFAULT_DURATION_MS = 10000,
     DEFAULT_FRAME_MS = 40,
     DEFAULT_LOG_LEVEL = 3,
+    DEFAULT_START_RETRIES = 5,
     SDK_STOP_TIMEOUT_MS = 3000,
     DISCONNECT_TIMEOUT_MS = 3000,
     CALLBACK_EVENT_RING_CAP = 2048,
@@ -69,6 +70,7 @@ typedef struct {
     int duration_ms;
     int frame_ms;
     int audio_iterations;
+    int start_retries;
     int json_output;
 } probe_config_t;
 
@@ -1303,6 +1305,7 @@ static int run_connect_command(const probe_config_t *config)
 {
     sample_set_t connect_us = {0};
     int success = 0;
+    int completed = 0;
     int i;
 
     for (i = 0; i < config->iterations && !g_should_exit; ++i) {
@@ -1324,6 +1327,7 @@ static int run_connect_command(const probe_config_t *config)
         }
         disconnect_session(&session);
         session_destroy(&session);
+        completed++;
     }
 
     printf("connect_success: %d/%d %.2f%%\n",
@@ -1332,7 +1336,7 @@ static int run_connect_command(const probe_config_t *config)
            config->iterations == 0 ? 0.0 : (double)success * 100.0 / (double)config->iterations);
     print_duration_summary_ms("connect_cost", &connect_us);
     sample_set_free(&connect_us);
-    return success == config->iterations ? 0 : 1;
+    return completed == config->iterations ? 0 : 1;
 }
 
 static int run_timesync_command(const probe_config_t *config)
@@ -1391,10 +1395,11 @@ static void make_audio_payload(uint8_t *payload, uint32_t frame_index)
 static int run_audio_iteration(probe_session_t *session,
                                const probe_config_t *config,
                                int64_t offset_ns,
-                               int iteration,
-                               int total_iterations,
+                               int success_iteration,
+                               int target_success_iterations,
                                sample_set_t *first_d2s_us,
                                sample_set_t *first_echo_us,
+                               sample_set_t *all_d2s_us,
                                sample_set_t *all_s2d_us,
                                sample_set_t *stutter_counts,
                                sample_set_t *stutter_time_us,
@@ -1425,8 +1430,8 @@ static int run_audio_iteration(probe_session_t *session,
     int64_t post_send_cpu_ns = 0;
     size_t i;
 
-    if (total_iterations > 1) {
-        printf("音频测试轮次: 第 %d/%d 次\n", iteration, total_iterations);
+    if (target_success_iterations > 1) {
+        printf("音频测试轮次: 第 %d/%d 次\n", success_iteration, target_success_iterations);
     }
 
     init_audio_tone_samples();
@@ -1601,6 +1606,7 @@ static int run_audio_iteration(probe_session_t *session,
     if (first_echo_valid) {
         (void)sample_set_push(first_echo_us, first_echo_value_us);
     }
+    sample_set_append_all(all_d2s_us, &d2s_us);
     sample_set_append_all(all_s2d_us, &s2d_us);
     (void)sample_set_push(stutter_counts, (int64_t)iteration_stutter_count);
     (void)sample_set_push(stutter_time_us, iteration_stutter_time_us);
@@ -1609,6 +1615,65 @@ static int run_audio_iteration(probe_session_t *session,
     sample_set_free(&echo_us);
     sample_set_free(&s2d_us);
     return 0;
+}
+
+static void print_audio_cumulative_summary(int success,
+                                           int target_success,
+                                           const sample_set_t *first_d2s_us,
+                                           const sample_set_t *first_echo_us,
+                                           const sample_set_t *all_d2s_us,
+                                           const sample_set_t *all_s2d_us,
+                                           const sample_set_t *stutter_counts,
+                                           const sample_set_t *stutter_time_us,
+                                           const sample_set_t *stutter_rate_ppm,
+                                           uint64_t total_sent,
+                                           uint64_t total_send_failed,
+                                           uint64_t total_server_observed,
+                                           uint64_t total_echo_received)
+{
+    sample_set_t first_d2s_copy = {0};
+    sample_set_t first_echo_copy = {0};
+    sample_set_t all_d2s_copy = {0};
+    sample_set_t all_s2d_copy = {0};
+    sample_set_t stutter_counts_copy = {0};
+    sample_set_t stutter_time_copy = {0};
+    sample_set_t stutter_rate_copy = {0};
+    double server_observed_rate = total_sent == 0 ? 0.0 :
+        (double)total_server_observed * 100.0 / (double)total_sent;
+    double echo_received_rate = total_sent == 0 ? 0.0 :
+        (double)total_echo_received * 100.0 / (double)total_sent;
+
+    sample_set_append_all(&first_d2s_copy, first_d2s_us);
+    sample_set_append_all(&first_echo_copy, first_echo_us);
+    sample_set_append_all(&all_d2s_copy, all_d2s_us);
+    sample_set_append_all(&all_s2d_copy, all_s2d_us);
+    sample_set_append_all(&stutter_counts_copy, stutter_counts);
+    sample_set_append_all(&stutter_time_copy, stutter_time_us);
+    sample_set_append_all(&stutter_rate_copy, stutter_rate_ppm);
+
+    printf("音频多轮汇总: 成功轮次=%d/%d\n", success, target_success);
+    printf("音频包数多轮汇总: 设备发送=%" PRIu64 " 发送失败=%" PRIu64 " 服务端收到=%" PRIu64 " 设备收到回声=%" PRIu64 " 服务端收包率=%.2f%% 回声收包率=%.2f%%\n",
+           total_sent,
+           total_send_failed,
+           total_server_observed,
+           total_echo_received,
+           server_observed_rate,
+           echo_received_rate);
+    print_duration_summary_ms_cn("音频首包上行延迟(设备到服务端)", &first_d2s_copy);
+    print_duration_summary_ms_cn("音频首包回声总延迟(设备发出到收到回声)", &first_echo_copy);
+    print_value_summary_cn("音频卡顿次数多轮汇总", &stutter_counts_copy);
+    print_duration_summary_ms_cn("音频卡顿时长多轮汇总", &stutter_time_copy);
+    print_percent_summary_cn("音频卡顿占比多轮汇总", &stutter_rate_copy);
+    print_duration_summary_ms_cn("音频上行延迟多轮汇总(设备到服务端)", &all_d2s_copy);
+    print_duration_summary_ms_cn("音频下行延迟多轮汇总(服务端到设备)", &all_s2d_copy);
+
+    sample_set_free(&first_d2s_copy);
+    sample_set_free(&first_echo_copy);
+    sample_set_free(&all_d2s_copy);
+    sample_set_free(&all_s2d_copy);
+    sample_set_free(&stutter_counts_copy);
+    sample_set_free(&stutter_time_copy);
+    sample_set_free(&stutter_rate_copy);
 }
 
 static int run_audio_command(const probe_config_t *config)
@@ -1620,6 +1685,7 @@ static int run_audio_command(const probe_config_t *config)
     int64_t offset_ns = 0;
     sample_set_t first_d2s_us = {0};
     sample_set_t first_echo_us = {0};
+    sample_set_t all_d2s_us = {0};
     sample_set_t all_s2d_us = {0};
     sample_set_t stutter_counts = {0};
     sample_set_t stutter_time_us = {0};
@@ -1629,8 +1695,8 @@ static int run_audio_command(const probe_config_t *config)
     uint64_t total_server_observed = 0;
     uint64_t total_echo_received = 0;
     int success = 0;
+    int attempts = 0;
     int rc;
-    int i;
 
     session_init(&sync_session);
     rc = connect_session(config, &sync_session);
@@ -1651,19 +1717,21 @@ static int run_audio_command(const probe_config_t *config)
     print_timesync_summary(sync_samples, sync_count, offset_ns);
     free(sync_samples);
 
-    for (i = 0; i < config->audio_iterations && !g_should_exit; ++i) {
+    while (success < config->audio_iterations && !g_should_exit) {
         probe_session_t session;
 
+        attempts++;
         session_init(&session);
         rc = connect_session(config, &session);
         if (rc == 0) {
             rc = run_audio_iteration(&session,
                                      config,
                                      offset_ns,
-                                     i + 1,
+                                     success + 1,
                                      config->audio_iterations,
                                      &first_d2s_us,
                                      &first_echo_us,
+                                     &all_d2s_us,
                                      &all_s2d_us,
                                      &stutter_counts,
                                      &stutter_time_us,
@@ -1679,32 +1747,31 @@ static int run_audio_command(const probe_config_t *config)
         session_destroy(&session);
         if (rc == 0) {
             success++;
+            print_audio_cumulative_summary(success,
+                                           config->audio_iterations,
+                                           &first_d2s_us,
+                                           &first_echo_us,
+                                           &all_d2s_us,
+                                           &all_s2d_us,
+                                           &stutter_counts,
+                                           &stutter_time_us,
+                                           &stutter_rate_ppm,
+                                           total_sent,
+                                           total_send_failed,
+                                           total_server_observed,
+                                           total_echo_received);
         } else {
-            log_message(stderr, "audio iteration %d failed", i + 1);
+            log_message(stderr,
+                        "audio attempt %d failed, successful_iterations=%d/%d",
+                        attempts,
+                        success,
+                        config->audio_iterations);
         }
-    }
-
-    if (config->audio_iterations > 1) {
-        double server_observed_rate = total_sent == 0 ? 0.0 : (double)total_server_observed * 100.0 / (double)total_sent;
-        double echo_received_rate = total_sent == 0 ? 0.0 : (double)total_echo_received * 100.0 / (double)total_sent;
-        printf("音频多轮汇总: 成功轮次=%d/%d\n", success, config->audio_iterations);
-        printf("音频包数多轮汇总: 设备发送=%" PRIu64 " 发送失败=%" PRIu64 " 服务端收到=%" PRIu64 " 设备收到回声=%" PRIu64 " 服务端收包率=%.2f%% 回声收包率=%.2f%%\n",
-               total_sent,
-               total_send_failed,
-               total_server_observed,
-               total_echo_received,
-               server_observed_rate,
-               echo_received_rate);
-        print_duration_summary_ms_cn("音频首包上行延迟(设备到服务端)", &first_d2s_us);
-        print_duration_summary_ms_cn("音频首包回声总延迟(设备发出到收到回声)", &first_echo_us);
-        print_value_summary_cn("音频卡顿次数多轮汇总", &stutter_counts);
-        print_duration_summary_ms_cn("音频卡顿时长多轮汇总", &stutter_time_us);
-        print_percent_summary_cn("音频卡顿占比多轮汇总", &stutter_rate_ppm);
-        print_duration_summary_ms_cn("音频下行延迟多轮汇总(服务端到设备)", &all_s2d_us);
     }
 
     sample_set_free(&first_d2s_us);
     sample_set_free(&first_echo_us);
+    sample_set_free(&all_d2s_us);
     sample_set_free(&all_s2d_us);
     sample_set_free(&stutter_counts);
     sample_set_free(&stutter_time_us);
@@ -1716,9 +1783,9 @@ static void print_usage(const char *program)
 {
     fprintf(stderr,
             "Usage:\n"
-            "  %s connect  --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--iterations <n>] [--connect-timeout-ms <ms>]\n"
+            "  %s connect  --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--iterations <n>] [--connect-timeout-ms <ms>] [--start-retries <n>]\n"
             "  %s timesync --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--repeat <n>] [--interval-ms <ms>] [--timeout-ms <ms>]\n"
-            "  %s audio    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--audio-iterations <n>] [--duration-ms <ms>] [--frame-ms <ms>] [--repeat <n>]\n",
+            "  %s audio    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--audio-iterations <n>] [--duration-ms <ms>] [--frame-ms <ms>] [--repeat <n>] [--start-retries <n>]\n",
             program,
             program,
             program);
@@ -1752,6 +1819,7 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
     config->duration_ms = DEFAULT_DURATION_MS;
     config->frame_ms = DEFAULT_FRAME_MS;
     config->audio_iterations = DEFAULT_ITERATIONS;
+    config->start_retries = DEFAULT_START_RETRIES;
 
     if (argc < 2) {
         return -1;
@@ -1784,6 +1852,7 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
             strcmp(arg, "--connect-timeout-ms") == 0 ||
             strcmp(arg, "--duration-ms") == 0 ||
             strcmp(arg, "--audio-iterations") == 0 ||
+            strcmp(arg, "--start-retries") == 0 ||
             strcmp(arg, "--frame-ms") == 0) {
             if (i + 1 >= argc) {
                 log_message(stderr, "%s requires a value", arg);
@@ -1819,6 +1888,9 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
                 return -1;
             } else if (strcmp(arg, "--audio-iterations") == 0 &&
                        parse_int_value(arg, argv[i + 1], 1, 10000, &config->audio_iterations) != 0) {
+                return -1;
+            } else if (strcmp(arg, "--start-retries") == 0 &&
+                       parse_int_value(arg, argv[i + 1], 1, 100, &config->start_retries) != 0) {
                 return -1;
             } else if (strcmp(arg, "--frame-ms") == 0 &&
                        parse_int_value(arg, argv[i + 1], 1, 1000, &config->frame_ms) != 0) {
@@ -1913,6 +1985,71 @@ static int sdk_start(const probe_config_t *config)
     return 0;
 }
 
+static int sdk_start_error_retryable(int rc)
+{
+    switch (rc) {
+        case TIRTC_E_TIMEOUTED:
+        case TIRTC_E_BUSY:
+        case TIRTC_E_CONN_TIMEOUTCLOSE:
+        case TIRTC_E_CONN_REMOTECLOSE:
+        case TIRTC_E_CONN_OTHER_ERROR:
+        case TIRTC_E_LACK_OF_RESOURCE:
+        case TIRTC_E_SERVER_ERROR:
+        case TIRTC_E_INTERNAL_ERROR:
+        case TIRTC_E_UNEXPECTED_RESPONSE:
+            return 1;
+        case TIRTC_E_NOT_INITIALIZED:
+        case TIRTC_E_INVALID_HANDLE:
+        case TIRTC_E_INVALID_PARAMETER:
+        case TIRTC_E_INVALID_LICENSE:
+        case TIRTC_E_CACHE_EXPIRED:
+        case TIRTC_E_NO_SECRET_KEY:
+        default:
+            return 0;
+    }
+}
+
+static int sdk_start_with_retry(const probe_config_t *config)
+{
+    int64_t started_us = monotonic_now_us();
+    int rc = -1;
+    int attempt;
+
+    for (attempt = 1; attempt <= config->start_retries && !g_should_exit; ++attempt) {
+        rc = sdk_start(config);
+        if (rc == 0) {
+            log_message(stdout,
+                        "TiRtcStart succeeded after attempts=%d elapsed=%.2fms",
+                        attempt,
+                        us_to_ms(monotonic_now_us() - started_us));
+            return 0;
+        }
+
+        if (!sdk_start_error_retryable(rc)) {
+            log_message(stderr,
+                        "TiRtcStart attempt %d/%d failed: %s retryable=no elapsed=%.2fms",
+                        attempt,
+                        config->start_retries,
+                        TiRtcGetErrorStr(rc),
+                        us_to_ms(monotonic_now_us() - started_us));
+            return rc;
+        }
+
+        log_message(stderr,
+                    "TiRtcStart attempt %d/%d failed: %s retryable=yes elapsed=%.2fms",
+                    attempt,
+                    config->start_retries,
+                    TiRtcGetErrorStr(rc),
+                    us_to_ms(monotonic_now_us() - started_us));
+    }
+
+    log_message(stderr,
+                "TiRtcStart failed after attempts=%d elapsed=%.2fms",
+                attempt - 1,
+                us_to_ms(monotonic_now_us() - started_us));
+    return rc;
+}
+
 static void sdk_stop(void)
 {
     if (TiRtcStop() != 0) {
@@ -1945,7 +2082,11 @@ int main(int argc, char **argv)
     signal(SIGTERM, signal_handler);
 
     log_message(stdout, "TiRTC version: %s", TiRtcGetVersion());
-    rc = sdk_start(&config);
+    if (config.command == COMMAND_CONNECT || config.command == COMMAND_AUDIO) {
+        rc = sdk_start_with_retry(&config);
+    } else {
+        rc = sdk_start(&config);
+    }
     if (rc != 0) {
         log_message(stderr, "failed to start SDK: %s", TiRtcGetErrorStr(rc));
         return 1;
