@@ -72,6 +72,7 @@ typedef struct {
     int audio_iterations;
     int start_retries;
     int json_output;
+    const char *audio_sample_log;
 } probe_config_t;
 
 typedef struct {
@@ -100,6 +101,9 @@ typedef struct {
     int send_ret;
     int observed;
     int echoed;
+    int64_t echo_arrival_gap_us;
+    int64_t stutter_time_us;
+    int stutter;
 } audio_sample_t;
 
 typedef struct {
@@ -857,12 +861,15 @@ static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *d
         }
         if (session->audio.last_echo_recv_mono_us > 0) {
             gap_us = now_mono_us - session->audio.last_echo_recv_mono_us;
+            sample->echo_arrival_gap_us = gap_us;
             if (gap_us > 300000LL) {
                 int expected_frame_ms = session->audio.expected_frame_ms > 0 ?
                     session->audio.expected_frame_ms :
                     DEFAULT_FRAME_MS;
+                sample->stutter = 1;
+                sample->stutter_time_us = gap_us - (int64_t)expected_frame_ms * 1000LL;
                 session->audio.stutter_count++;
-                session->audio.stutter_time_us += gap_us - (int64_t)expected_frame_ms * 1000LL;
+                session->audio.stutter_time_us += sample->stutter_time_us;
             }
         }
         session->audio.last_echo_recv_mono_us = now_mono_us;
@@ -1392,11 +1399,56 @@ static void make_audio_payload(uint8_t *payload, uint32_t frame_index)
     }
 }
 
+static void write_audio_sample_log(FILE *stream,
+                                   int success_iteration,
+                                   const audio_metrics_t *audio,
+                                   int64_t offset_ns)
+{
+    size_t i;
+
+    if (stream == NULL) {
+        return;
+    }
+    for (i = 0; i < audio->len; ++i) {
+        const audio_sample_t *sample = &audio->items[i];
+        int64_t echo_us = sample->echoed ?
+            sample->client_echo_recv_mono_us - sample->client_send_mono_us : 0;
+        int64_t echo_recv_unix_ns = sample->echoed ?
+            sample->client_send_unix_ns + echo_us * 1000LL : 0;
+        int64_t uplink_us = sample->observed ?
+            (sample->server_recv_unix_ns - (sample->client_send_unix_ns + offset_ns)) / 1000LL : 0;
+        int64_t downlink_us = sample->observed && sample->echoed ?
+            ((echo_recv_unix_ns + offset_ns) - sample->server_recv_unix_ns) / 1000LL : 0;
+
+        fprintf(stream,
+                "%d,%" PRIu32 ",%" PRIu32 ",%d,%" PRId64 ",%d,%d,%" PRId64 ",%" PRId64
+                ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%d,%" PRId64 "\n",
+                success_iteration,
+                sample->send_index,
+                sample->frame_ts_ms,
+                sample->send_ret,
+                sample->send_late_us,
+                sample->observed,
+                sample->echoed,
+                sample->client_send_unix_ns,
+                sample->server_recv_unix_ns,
+                echo_recv_unix_ns,
+                uplink_us,
+                downlink_us,
+                echo_us,
+                sample->echo_arrival_gap_us,
+                sample->stutter,
+                sample->stutter_time_us);
+    }
+    fflush(stream);
+}
+
 static int run_audio_iteration(probe_session_t *session,
                                const probe_config_t *config,
                                int64_t offset_ns,
                                int success_iteration,
                                int target_success_iterations,
+                               FILE *sample_log,
                                sample_set_t *first_d2s_us,
                                sample_set_t *first_echo_us,
                                sample_set_t *all_d2s_us,
@@ -1548,6 +1600,7 @@ static int run_audio_iteration(probe_session_t *session,
             first_echo_valid = 1;
         }
     }
+    write_audio_sample_log(sample_log, success_iteration, &session->audio, offset_ns);
     printf("音频首包时间: 设备发送=%.6f 服务端收到(已换算到设备时钟)=%.6f 设备收到回声=%.6f\n",
            ns_to_s(session->audio.first_client_send_unix_ns),
            ns_to_s(session->audio.first_server_recv_unix_ns - offset_ns),
@@ -1697,12 +1750,31 @@ static int run_audio_command(const probe_config_t *config)
     int success = 0;
     int attempts = 0;
     int rc;
+    FILE *sample_log = NULL;
+
+    if (config->audio_sample_log != NULL && config->audio_sample_log[0] != '\0') {
+        sample_log = fopen(config->audio_sample_log, "w");
+        if (sample_log == NULL) {
+            log_message(stderr,
+                        "failed to open audio sample log %s: %s",
+                        config->audio_sample_log,
+                        strerror(errno));
+            return 1;
+        }
+        fprintf(sample_log,
+                "iteration,send_index,frame_ts_ms,send_ret,send_late_us,observed,echoed,"
+                "client_send_unix_ns,server_recv_unix_ns,client_echo_recv_unix_ns,"
+                "uplink_us,downlink_us,echo_us,echo_arrival_gap_us,stutter,stutter_time_us\n");
+    }
 
     session_init(&sync_session);
     rc = connect_session(config, &sync_session);
     if (rc != 0) {
         log_message(stderr, "connect failed: %s", TiRtcGetErrorStr(rc));
         session_destroy(&sync_session);
+        if (sample_log != NULL) {
+            fclose(sample_log);
+        }
         return 1;
     }
 
@@ -1712,6 +1784,9 @@ static int run_audio_command(const probe_config_t *config)
     session_destroy(&sync_session);
     if (rc != 0) {
         log_message(stderr, "pre-audio timesync failed");
+        if (sample_log != NULL) {
+            fclose(sample_log);
+        }
         return 1;
     }
     print_timesync_summary(sync_samples, sync_count, offset_ns);
@@ -1729,6 +1804,7 @@ static int run_audio_command(const probe_config_t *config)
                                      offset_ns,
                                      success + 1,
                                      config->audio_iterations,
+                                     sample_log,
                                      &first_d2s_us,
                                      &first_echo_us,
                                      &all_d2s_us,
@@ -1776,6 +1852,9 @@ static int run_audio_command(const probe_config_t *config)
     sample_set_free(&stutter_counts);
     sample_set_free(&stutter_time_us);
     sample_set_free(&stutter_rate_ppm);
+    if (sample_log != NULL) {
+        fclose(sample_log);
+    }
     return success == config->audio_iterations ? 0 : 1;
 }
 
@@ -1785,7 +1864,7 @@ static void print_usage(const char *program)
             "Usage:\n"
             "  %s connect  --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--iterations <n>] [--connect-timeout-ms <ms>] [--start-retries <n>]\n"
             "  %s timesync --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--repeat <n>] [--interval-ms <ms>] [--timeout-ms <ms>]\n"
-            "  %s audio    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--audio-iterations <n>] [--duration-ms <ms>] [--frame-ms <ms>] [--repeat <n>] [--start-retries <n>]\n",
+            "  %s audio    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--audio-iterations <n>] [--duration-ms <ms>] [--frame-ms <ms>] [--repeat <n>] [--start-retries <n>] [--audio-sample-log <csv-path>]\n",
             program,
             program,
             program);
@@ -1852,6 +1931,7 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
             strcmp(arg, "--connect-timeout-ms") == 0 ||
             strcmp(arg, "--duration-ms") == 0 ||
             strcmp(arg, "--audio-iterations") == 0 ||
+            strcmp(arg, "--audio-sample-log") == 0 ||
             strcmp(arg, "--start-retries") == 0 ||
             strcmp(arg, "--frame-ms") == 0) {
             if (i + 1 >= argc) {
@@ -1889,6 +1969,8 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
             } else if (strcmp(arg, "--audio-iterations") == 0 &&
                        parse_int_value(arg, argv[i + 1], 1, 10000, &config->audio_iterations) != 0) {
                 return -1;
+            } else if (strcmp(arg, "--audio-sample-log") == 0) {
+                config->audio_sample_log = argv[i + 1];
             } else if (strcmp(arg, "--start-retries") == 0 &&
                        parse_int_value(arg, argv[i + 1], 1, 100, &config->start_retries) != 0) {
                 return -1;
@@ -2004,8 +2086,10 @@ static int sdk_start_error_retryable(int rc)
         case TIRTC_E_INVALID_LICENSE:
         case TIRTC_E_CACHE_EXPIRED:
         case TIRTC_E_NO_SECRET_KEY:
-        default:
             return 0;
+        default:
+            /* Preserve retries for transport/internal codes not yet exposed by tiRTC.h. */
+            return 1;
     }
 }
 
@@ -2027,25 +2111,29 @@ static int sdk_start_with_retry(const probe_config_t *config)
 
         if (!sdk_start_error_retryable(rc)) {
             log_message(stderr,
-                        "TiRtcStart attempt %d/%d failed: %s retryable=no elapsed=%.2fms",
+                        "TiRtcStart attempt %d/%d failed: rc=%d error=%s retryable=no elapsed=%.2fms",
                         attempt,
                         config->start_retries,
+                        rc,
                         TiRtcGetErrorStr(rc),
                         us_to_ms(monotonic_now_us() - started_us));
             return rc;
         }
 
         log_message(stderr,
-                    "TiRtcStart attempt %d/%d failed: %s retryable=yes elapsed=%.2fms",
+                    "TiRtcStart attempt %d/%d failed: rc=%d error=%s retryable=yes elapsed=%.2fms",
                     attempt,
                     config->start_retries,
+                    rc,
                     TiRtcGetErrorStr(rc),
                     us_to_ms(monotonic_now_us() - started_us));
     }
 
     log_message(stderr,
-                "TiRtcStart failed after attempts=%d elapsed=%.2fms",
+                "TiRtcStart failed after attempts=%d rc=%d error=%s elapsed=%.2fms",
                 attempt - 1,
+                rc,
+                TiRtcGetErrorStr(rc),
                 us_to_ms(monotonic_now_us() - started_us));
     return rc;
 }
@@ -2088,7 +2176,7 @@ int main(int argc, char **argv)
         rc = sdk_start(&config);
     }
     if (rc != 0) {
-        log_message(stderr, "failed to start SDK: %s", TiRtcGetErrorStr(rc));
+        log_message(stderr, "failed to start SDK: rc=%d error=%s", rc, TiRtcGetErrorStr(rc));
         return 1;
     }
 

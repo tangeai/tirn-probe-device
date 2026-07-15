@@ -98,12 +98,16 @@ build/linux-x86_64/tirtc_accel_device_probe
   --peer-id 'whips://whip-echo-svc?device_id=your_device_id' \
   --token your_connect_token \
   --duration-ms 10000 \
-  --frame-ms 40
+  --frame-ms 40 \
+  --audio-sample-log /tmp/audio-samples.csv
 ```
 
 音频测试开始前会先执行对时。测试期间设备发送带序号和发送时间的测试音频包，`whip-echo-svc` 回传服务端
 收到每个测试音频包的时间并继续 echo 音频。工具输出音频首包时间、音频卡顿率、设备到服务端音频延迟、
 服务端到设备 echo 延迟和端到端 echo 延迟的分位值。
+
+`--audio-sample-log` 可选。未指定或传入空字符串时不创建文件；指定路径时写入逐包 CSV，包含轮次、帧序号、
+发送与收包时间、上下行和端到端延迟、相邻回声到达间隔以及卡顿标记。
 
 ## 脚本说明
 
