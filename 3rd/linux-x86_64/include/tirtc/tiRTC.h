@@ -171,7 +171,7 @@ extern "C" {
 #endif
 
 #define TIRTC_VERSION_MAJOR     2
-#define TIRTC_VERSION_MINOR     2
+#define TIRTC_VERSION_MINOR     3
 #define TIRTC_VERSION_PATCH     0
 /* -------------------------------------------------------------------------
  * 错误码
@@ -219,6 +219,18 @@ typedef enum {
     TIRTC_NETCONN_WIFI = 0,  ///< Wi-Fi（默认）
     TIRTC_NETCONN_4G         ///< 运营商数据网络（4G）
 } TIRTCNETCONN;
+
+/** 主动连接的链路选择策略，用于 \ref TIRTC_OPT_CONNECT_LINK_MODE 选项。 */
+typedef enum TiRtcConnectLinkMode {
+    /** 自动选择链路：优先尝试 P2P/UDP 直连，并允许 Relay/TURN 回退。 */
+    TIRTC_CONNECT_LINK_MODE_AUTO = 0,
+
+    /** 仅尝试 P2P/UDP 直连，不使用 Relay/TURN；直连失败时连接失败。 */
+    TIRTC_CONNECT_LINK_MODE_DIRECT_ONLY = 1,
+
+    /** 仅使用 Relay/TURN 中转，不尝试 P2P/UDP 直连；Relay/TURN 不可用时连接失败。 */
+    TIRTC_CONNECT_LINK_MODE_RELAY_ONLY = 2
+} TiRtcConnectLinkMode;
 
 /** 可配置项，通过 TiRtcSetOption() 设置。
  *
@@ -271,6 +283,15 @@ typedef enum TIRTCOPTION {
 
     /** 开发者自己维护的设备标识, 可以取MAC/ICCID/IMEI/芯片标识/..., 唯一作用是与设备 uuid 一起用来防止生产重号. */
     TIRTC_OPT_CLIENT_ID,
+
+    /** 主动连接的链路选择策略（`int *`，值为 \ref TiRtcConnectLinkMode）。
+     *
+     * 默认 \ref TIRTC_CONNECT_LINK_MODE_AUTO "TIRTC_CONNECT_LINK_MODE_AUTO"。
+     * 可在 TiRtcStart() 后设置；设置后影响后续 \ref TiRtcConnect() 发起的连接，
+     * 不影响已发起或已建立的连接，也不影响设备端被动接入的连接。不要在其它线程
+     * 并发调用 \ref TiRtcConnect() 时修改该选项。
+     */
+    TIRTC_OPT_CONNECT_LINK_MODE,
 
     /** 是否在连接关闭时打印统计日志 （`int *`, 0 不打印 / 1 打印). 默认 0. */
     //TIRTC_OPT_PRINT_CONN_STAT
@@ -338,6 +359,17 @@ typedef enum {
     TIRTC_EVENT_ACCESS_HIJACKING,  ///< HTTP 请求被重定向（可能遭受中间人攻击）
 } TIRTCSYSEVENT;
 
+/** 连接统计信息快照。
+ *
+ * 当前仅包含应用通常需要直接读取的往返时延。字段为最近统计窗口的平均 RTT，
+ * 单位 ms；值为 0 表示当前没有有效样本或底层未提供该项统计。
+ */
+typedef struct TiRtcConnStats {
+    uint32_t audio_rtt_ms;    ///< 音频通道 RTT
+    uint32_t video_rtt_ms;    ///< 视频通道 RTT
+    uint32_t command_rtt_ms;  ///< 命令通道 RTT
+} TiRtcConnStats;
+
 /** SDK 回调函数集合，传入 TiRtcStart()。
  *
  * \warning 结构体指针不能指向临时变量，其生命周期须覆盖整个 SDK 运行期间。
@@ -351,8 +383,8 @@ typedef struct TIRTCCALLBACKS {
      */
     void (*on_event)(int event, const void *data, int len);
 
-    /** 设备端收到新的入站连接。
-     *  \param hconn 新连接句柄，可立即用于发送媒体或命令
+    /** 设备端收到新的入站连接，且连接已可用于发送命令、音频和视频。
+     *  \param hconn 新连接句柄
      */
     void (*on_conn_accepted)(tirtc_conn_t hconn);
 
@@ -440,10 +472,26 @@ typedef struct TIRTCCALLBACKS {
 /** TiRtcConnect() 的结果回调。
  *
  * \param error     0 表示连接成功，否则为错误码
- * \param hconn     连接成功时为有效连接句柄，失败时为 NULL
+ * \param hconn     连接成功时为有效连接句柄，失败时为 NULL。
+ *                  error 为 0 时，hconn 已可用于发送命令、音频和视频。
  * \param user_data TiRtcConnect() 调用时传入的用户上下文指针
  */
 typedef void (*TIRTCCONNECTCALLBACK)(int error, tirtc_conn_t hconn, void *user_data);
+
+/** SDK 请求应用调整指定视频流的目标码率。
+ *
+ * \param hconn              连接句柄
+ * \param stream_id          视频流 ID
+ * \param target_bitrate_bps SDK 建议应用到编码器的绝对目标码率，单位 bps
+ * \param user_data          注册回调时传入的用户上下文指针
+ *
+ * \note target_bitrate_bps 是绝对目标值，不是增量值或比例值。
+ * \note 回调运行在 SDK 内部线程，应用应快速返回；如需重配编码器，建议投递到编码线程处理。
+ */
+typedef void (*TiRtcVideoBitrateRequestCallback)(tirtc_conn_t hconn,
+                                                 uint8_t stream_id,
+                                                 uint32_t target_bitrate_bps,
+                                                 void *user_data);
 
 /** 日志输出回调，通过 TiRtcLogSetCallback() 设置。
  *
@@ -563,6 +611,16 @@ TiRTC_EXPORT int TiRtcDisconnect(tirtc_conn_t hconn);
  */
 TiRTC_EXPORT size_t TiRtcGetSendBufferUsed(tirtc_conn_t hconn);
 
+/** 获取连接统计信息快照。
+ *
+ * \param hconn 连接句柄
+ * \param stats 输出统计信息，不能为 NULL
+ * \return 0 成功；否则为 TIRTC_E_* 错误码
+ *
+ * \note 该接口同步返回当前快照，不阻塞等待新样本。
+ */
+TiRTC_EXPORT int TiRtcConnGetStats(tirtc_conn_t hconn, TiRtcConnStats *stats);
+
 /** 将用户数据指针关联到连接。
  *
  * \param hconn     连接句柄
@@ -643,6 +701,47 @@ TiRTC_EXPORT int TiRtcSendVideoStream(tirtc_conn_t hconn,
 TiRTC_EXPORT int TiRtcSendAudioStream(tirtc_conn_t hconn,
                                 const TIRTCFRAMEINFO *pFi,
                                 const void *frame);
+
+/** 设置指定视频流的码率控制范围。
+ *
+ * \param hconn     连接句柄
+ * \param stream_id 视频流 ID，需与 TiRtcSendVideoStream() 中的
+ *                  TIRTCFRAMEINFO::stream_id 一致
+ * \param min_bps   最小目标码率，单位 bps
+ * \param max_bps   最大目标码率，单位 bps
+ * \param start_bps 当前/初始目标码率，单位 bps
+ * \return 0 表示 SDK 已接收该配置；否则为 TIRTC_E_* 错误码
+ *
+ * \note SDK 会缓存最近一次配置，并在 video channel 建立后下发给底层传输。
+ *       如果调用时 video channel 已建立，SDK 会立即尝试下发。返回 0 不表示
+ *       底层传输已经同步应用该配置。
+ * \note 建议传入 min_bps > 0 && min_bps <= start_bps && start_bps <= max_bps；
+ *       具体参数合法性由底层传输判断。
+ * \note 建议在连接成功或 on_conn_accepted 之后、开始稳定发送该视频流前调用。
+ * \note 该接口用于设置长期范围和初始值，不应在每次码率请求回调后重复调用。
+ */
+TiRTC_EXPORT int TiRtcConnSetVideoBitrateParams(tirtc_conn_t hconn,
+                                                uint8_t stream_id,
+                                                uint32_t min_bps,
+                                                uint32_t max_bps,
+                                                uint32_t start_bps);
+
+/** 注册指定视频流的目标码率请求回调。
+ *
+ * \param hconn     连接句柄
+ * \param stream_id 视频流 ID，需与 TiRtcConnSetVideoBitrateParams() 使用的
+ *                  stream_id 一致
+ * \param cb        目标码率请求回调，不能为 NULL
+ * \param user_data 用户上下文指针，回调触发时原样传回
+ * \return 0 成功；否则为 TIRTC_E_* 错误码
+ *
+ * \note 建议在连接成功或 on_conn_accepted 之后调用。
+ * \note 同一视频流重复调用时仅更新公开回调和 user_data。
+ */
+TiRTC_EXPORT int TiRtcConnSetVideoBitrateRequestCallback(tirtc_conn_t hconn,
+                                                         uint8_t stream_id,
+                                                         TiRtcVideoBitrateRequestCallback cb,
+                                                         void *user_data);
 
 /** @} */ /* tirtc_media */
 
