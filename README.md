@@ -109,6 +109,12 @@ build/linux-x86_64/tirtc_accel_device_probe
 `--audio-sample-log` 可选。未指定或传入空字符串时不创建文件；指定路径时写入逐包 CSV，包含轮次、帧序号、
 发送与收包时间、上下行和端到端延迟、相邻回声到达间隔以及卡顿标记。
 
+### TiRTC 日志等级
+
+两个示例程序均支持 `--log-level <level>`。等级 `1`~`5` 分别对应
+error/warn/ok/info/verbose；`11`~`100` 会额外开启 WebRTC 底层日志，输出量较大且可能影响性能。
+`device_uplink_demo` 默认等级为 `4`，`tirtc_accel_device_probe` 默认等级为 `3`。
+
 ## 脚本说明
 
 ### `./script/build.sh`

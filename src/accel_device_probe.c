@@ -71,6 +71,7 @@ typedef struct {
     int frame_ms;
     int audio_iterations;
     int start_retries;
+    int log_level;
     int json_output;
     const char *audio_sample_log;
 } probe_config_t;
@@ -1749,7 +1750,8 @@ static int run_audio_command(const probe_config_t *config)
     uint64_t total_echo_received = 0;
     int success = 0;
     int attempts = 0;
-    int rc;
+    int sync_connect_attempt;
+    int rc = TIRTC_E_CONN_OTHER_ERROR;
     FILE *sample_log = NULL;
 
     if (config->audio_sample_log != NULL && config->audio_sample_log[0] != '\0') {
@@ -1767,11 +1769,35 @@ static int run_audio_command(const probe_config_t *config)
                 "uplink_us,downlink_us,echo_us,echo_arrival_gap_us,stutter,stutter_time_us\n");
     }
 
-    session_init(&sync_session);
-    rc = connect_session(config, &sync_session);
-    if (rc != 0) {
-        log_message(stderr, "connect failed: %s", TiRtcGetErrorStr(rc));
+    for (sync_connect_attempt = 1;
+         sync_connect_attempt <= config->start_retries && !g_should_exit;
+         ++sync_connect_attempt) {
+        session_init(&sync_session);
+        rc = connect_session(config, &sync_session);
+        if (rc == 0) {
+            log_message(stdout,
+                        "pre-audio connect succeeded after attempts=%d",
+                        sync_connect_attempt);
+            break;
+        }
+        log_message(stderr,
+                    "pre-audio connect attempt %d/%d failed: rc=%d error=%s",
+                    sync_connect_attempt,
+                    config->start_retries,
+                    rc,
+                    TiRtcGetErrorStr(rc));
+        disconnect_session(&sync_session);
         session_destroy(&sync_session);
+        if (sync_connect_attempt < config->start_retries && !g_should_exit) {
+            sleep_for_us(100000LL);
+        }
+    }
+    if (rc != 0) {
+        log_message(stderr,
+                    "pre-audio connect failed after attempts=%d: rc=%d error=%s",
+                    sync_connect_attempt - 1,
+                    rc,
+                    TiRtcGetErrorStr(rc));
         if (sample_log != NULL) {
             fclose(sample_log);
         }
@@ -1862,9 +1888,9 @@ static void print_usage(const char *program)
 {
     fprintf(stderr,
             "Usage:\n"
-            "  %s connect  --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--iterations <n>] [--connect-timeout-ms <ms>] [--start-retries <n>]\n"
-            "  %s timesync --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--repeat <n>] [--interval-ms <ms>] [--timeout-ms <ms>]\n"
-            "  %s audio    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--audio-iterations <n>] [--duration-ms <ms>] [--frame-ms <ms>] [--repeat <n>] [--start-retries <n>] [--audio-sample-log <csv-path>]\n",
+            "  %s connect  --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--iterations <n>] [--connect-timeout-ms <ms>] [--start-retries <n>] [--log-level <1-5|11+>]\n"
+            "  %s timesync --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--repeat <n>] [--interval-ms <ms>] [--timeout-ms <ms>] [--log-level <1-5|11+>]\n"
+            "  %s audio    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--audio-iterations <n>] [--duration-ms <ms>] [--frame-ms <ms>] [--repeat <n>] [--start-retries <n>] [--audio-sample-log <csv-path>] [--log-level <1-5|11+>]\n",
             program,
             program,
             program);
@@ -1899,6 +1925,7 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
     config->frame_ms = DEFAULT_FRAME_MS;
     config->audio_iterations = DEFAULT_ITERATIONS;
     config->start_retries = DEFAULT_START_RETRIES;
+    config->log_level = DEFAULT_LOG_LEVEL;
 
     if (argc < 2) {
         return -1;
@@ -1933,6 +1960,7 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
             strcmp(arg, "--audio-iterations") == 0 ||
             strcmp(arg, "--audio-sample-log") == 0 ||
             strcmp(arg, "--start-retries") == 0 ||
+            strcmp(arg, "--log-level") == 0 ||
             strcmp(arg, "--frame-ms") == 0) {
             if (i + 1 >= argc) {
                 log_message(stderr, "%s requires a value", arg);
@@ -1974,6 +2002,13 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
             } else if (strcmp(arg, "--start-retries") == 0 &&
                        parse_int_value(arg, argv[i + 1], 1, 100, &config->start_retries) != 0) {
                 return -1;
+            } else if (strcmp(arg, "--log-level") == 0) {
+                if (parse_int_value(arg, argv[i + 1], 1, 100, &config->log_level) != 0 ||
+                    (config->log_level > 5 && config->log_level <= 10)) {
+                    log_message(stderr, "invalid %s: %s (expected 1-5 or 11-100)",
+                                arg, argv[i + 1]);
+                    return -1;
+                }
             } else if (strcmp(arg, "--frame-ms") == 0 &&
                        parse_int_value(arg, argv[i + 1], 1, 1000, &config->frame_ms) != 0) {
                 return -1;
@@ -2026,7 +2061,8 @@ static int sdk_start(const probe_config_t *config)
         return rc;
     }
     TiRtcLogConfig(1, NULL, 0);
-    TiRtcLogSetLevel(DEFAULT_LOG_LEVEL);
+    TiRtcLogSetLevel(config->log_level);
+    log_message(stdout, "TiRTC log level: %d", config->log_level);
 
     if (TiRtcSetOption(TIRTC_OPT_DEVICE_SECRET_KEY,
                        config->device_secret_key,

@@ -18,7 +18,12 @@ typedef struct {
     const char *endpoint;
     const char *device_id;
     const char *device_secret_key;
+    int log_level;
 } device_demo_config_t;
+
+enum {
+    DEFAULT_LOG_LEVEL = 4,
+};
 
 typedef struct device_demo_session {
     tirtc_conn_t hconn;
@@ -75,8 +80,25 @@ static void signal_handler(int signal_number)
 static void print_usage(const char *program_name)
 {
     fprintf(stderr,
-            "Usage: %s [--endpoint <url>] --device-id <id> --device-secret-key <key>\n",
+            "Usage: %s [--endpoint <url>] --device-id <id> --device-secret-key <key> "
+            "[--log-level <1-5|11+>]\n",
             program_name);
+}
+
+static int parse_log_level(const char *value, int *out_log_level)
+{
+    char *endptr;
+    long parsed;
+
+    errno = 0;
+    parsed = strtol(value, &endptr, 10);
+    if (errno != 0 || endptr == value || *endptr != '\0' ||
+        parsed < 1 || parsed > 100 || (parsed > 5 && parsed <= 10)) {
+        log_message(stderr, "invalid --log-level: %s (expected 1-5 or 11-100)", value);
+        return -1;
+    }
+    *out_log_level = (int)parsed;
+    return 0;
 }
 
 static int validate_required_value(const char *field_name, const char *value)
@@ -106,6 +128,7 @@ static int parse_arguments(int argc,
     int index = 1;
 
     memset(out_config, 0, sizeof(*out_config));
+    out_config->log_level = DEFAULT_LOG_LEVEL;
     while (index < argc) {
         const char *argument = argv[index];
 
@@ -133,6 +156,17 @@ static int parse_arguments(int argc,
                 return -1;
             }
             out_config->device_secret_key = argv[index + 1];
+            index += 2;
+            continue;
+        }
+        if (strcmp(argument, "--log-level") == 0) {
+            if (index + 1 >= argc) {
+                log_message(stderr, "--log-level requires a value");
+                return -1;
+            }
+            if (parse_log_level(argv[index + 1], &out_config->log_level) != 0) {
+                return -1;
+            }
             index += 2;
             continue;
         }
@@ -591,7 +625,8 @@ int main(int argc, char **argv)
         return 1;
     }
     TiRtcLogConfig(1, NULL, 0);
-    TiRtcLogSetLevel((int)kSdkLogLevel);
+    TiRtcLogSetLevel(config.log_level);
+    log_message(stdout, "TiRTC log level: %d", config.log_level);
 
     if (TiRtcSetOption(TIRTC_OPT_DEVICE_SECRET_KEY,
                        config.device_secret_key,
