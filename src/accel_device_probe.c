@@ -33,6 +33,7 @@ enum {
     DEFAULT_TIMEOUT_MS = 1000,
     DEFAULT_CONNECT_TIMEOUT_MS = 20000,
     DEFAULT_DURATION_MS = 10000,
+    DEFAULT_CONNECTIONS = 1,
     DEFAULT_FRAME_MS = 40,
     DEFAULT_LOG_LEVEL = 3,
     DEFAULT_START_RETRIES = 5,
@@ -51,6 +52,7 @@ static int g_audio_tone_samples_initialized;
 
 typedef enum {
     COMMAND_CONNECT,
+    COMMAND_IDLE,
     COMMAND_TIMESYNC,
     COMMAND_AUDIO,
 } probe_command_t;
@@ -63,6 +65,7 @@ typedef struct {
     const char *peer_id;
     const char *token;
     int iterations;
+    int connections;
     int repeat;
     int interval_ms;
     int timeout_ms;
@@ -137,6 +140,7 @@ typedef struct {
     int connect_error;
     int disconnected;
     int conn_error;
+    int idle_only;
     int64_t connect_started_us;
     int64_t connect_cost_us;
     uint32_t waiting_timesync_seq;
@@ -841,6 +845,9 @@ static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *d
     if (session == NULL || info == NULL || data == NULL) {
         return;
     }
+    if (session->idle_only) {
+        return;
+    }
     if (is_latency_probe_payload(data, info->length)) {
         (void)TiRtcSendAudioStream(hconn, info, data);
         return;
@@ -1345,6 +1352,134 @@ static int run_connect_command(const probe_config_t *config)
     print_duration_summary_ms("connect_cost", &connect_us);
     sample_set_free(&connect_us);
     return completed == config->iterations ? 0 : 1;
+}
+
+static int idle_session_is_connected(probe_session_t *session)
+{
+    int connected;
+
+    pthread_mutex_lock(&session->mutex);
+    connected = session->connect_done && session->connect_error == 0 &&
+                session->hconn != NULL && !session->disconnected;
+    pthread_mutex_unlock(&session->mutex);
+    return connected;
+}
+
+static int count_idle_connections(probe_session_t *sessions, int count)
+{
+    int connected = 0;
+    int i;
+
+    for (i = 0; i < count; ++i) {
+        if (idle_session_is_connected(&sessions[i])) {
+            connected++;
+        }
+    }
+    return connected;
+}
+
+static int run_idle_command(const probe_config_t *config)
+{
+    probe_session_t *sessions;
+    sample_set_t connect_us = {0};
+    int initialized = 0;
+    int succeeded = 0;
+    int peak = 0;
+    int active_end;
+    int unexpected_disconnected;
+    int64_t hold_started_us;
+    int64_t next_status_us;
+    int i;
+
+    sessions = (probe_session_t *)calloc((size_t)config->connections, sizeof(*sessions));
+    if (sessions == NULL) {
+        log_message(stderr, "failed to allocate %d idle sessions", config->connections);
+        return 1;
+    }
+
+    log_message(stdout,
+                "idle ramp started: target_connections=%d interval_ms=%d hold_duration_ms=%d",
+                config->connections,
+                config->interval_ms,
+                config->duration_ms);
+    for (i = 0; i < config->connections && !g_should_exit; ++i) {
+        int rc;
+        int64_t cost_us;
+
+        session_init(&sessions[i]);
+        sessions[i].idle_only = 1;
+        initialized++;
+        rc = connect_session(config, &sessions[i]);
+        pthread_mutex_lock(&sessions[i].mutex);
+        cost_us = sessions[i].connect_cost_us;
+        pthread_mutex_unlock(&sessions[i].mutex);
+        if (rc == 0) {
+            int active;
+
+            succeeded++;
+            (void)sample_set_push(&connect_us, cost_us);
+            active = count_idle_connections(sessions, initialized);
+            if (active > peak) {
+                peak = active;
+            }
+            log_message(stdout,
+                        "idle connection %d/%d established in %.2fms active=%d",
+                        i + 1,
+                        config->connections,
+                        us_to_ms(cost_us),
+                        active);
+        } else {
+            log_message(stderr,
+                        "idle connection %d/%d failed: rc=%d error=%s",
+                        i + 1,
+                        config->connections,
+                        rc,
+                        TiRtcGetErrorStr(rc));
+            disconnect_session(&sessions[i]);
+        }
+        if (i + 1 < config->connections && !g_should_exit) {
+            sleep_for_us((int64_t)config->interval_ms * 1000LL);
+        }
+    }
+
+    hold_started_us = monotonic_now_us();
+    next_status_us = hold_started_us;
+    while (!g_should_exit &&
+           monotonic_now_us() - hold_started_us < (int64_t)config->duration_ms * 1000LL) {
+        int64_t now_us = monotonic_now_us();
+        if (now_us >= next_status_us) {
+            int active = count_idle_connections(sessions, initialized);
+            if (active > peak) {
+                peak = active;
+            }
+            log_message(stdout,
+                        "idle hold: elapsed_ms=%lld active=%d/%d",
+                        (long long)((now_us - hold_started_us) / 1000LL),
+                        active,
+                        config->connections);
+            next_status_us = now_us + 1000000LL;
+        }
+        sleep_for_us(100000LL);
+    }
+
+    active_end = count_idle_connections(sessions, initialized);
+    unexpected_disconnected = succeeded > active_end ? succeeded - active_end : 0;
+    printf("idle_connections: established=%d/%d peak=%d active_end=%d unexpected_disconnected=%d\n",
+           succeeded,
+           config->connections,
+           peak,
+           active_end,
+           unexpected_disconnected);
+    print_duration_summary_ms("idle_connect_cost", &connect_us);
+
+    for (i = initialized - 1; i >= 0; --i) {
+        disconnect_session(&sessions[i]);
+        session_destroy(&sessions[i]);
+    }
+    sample_set_free(&connect_us);
+    free(sessions);
+
+    return !g_should_exit && succeeded == config->connections && active_end == succeeded ? 0 : 1;
 }
 
 static int run_timesync_command(const probe_config_t *config)
@@ -1889,8 +2024,10 @@ static void print_usage(const char *program)
     fprintf(stderr,
             "Usage:\n"
             "  %s connect  --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--iterations <n>] [--connect-timeout-ms <ms>] [--start-retries <n>] [--log-level <1-5|11+>]\n"
+            "  %s idle     --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> --connections <n> [--duration-ms <ms>] [--interval-ms <ms>] [--connect-timeout-ms <ms>] [--log-level <1-5|11+>]\n"
             "  %s timesync --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--repeat <n>] [--interval-ms <ms>] [--timeout-ms <ms>] [--log-level <1-5|11+>]\n"
             "  %s audio    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--audio-iterations <n>] [--duration-ms <ms>] [--frame-ms <ms>] [--repeat <n>] [--start-retries <n>] [--audio-sample-log <csv-path>] [--log-level <1-5|11+>]\n",
+            program,
             program,
             program,
             program);
@@ -1917,6 +2054,7 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
 
     memset(config, 0, sizeof(*config));
     config->iterations = DEFAULT_ITERATIONS;
+    config->connections = DEFAULT_CONNECTIONS;
     config->repeat = DEFAULT_REPEAT;
     config->interval_ms = DEFAULT_INTERVAL_MS;
     config->timeout_ms = DEFAULT_TIMEOUT_MS;
@@ -1932,6 +2070,8 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
     }
     if (strcmp(argv[1], "connect") == 0) {
         config->command = COMMAND_CONNECT;
+    } else if (strcmp(argv[1], "idle") == 0) {
+        config->command = COMMAND_IDLE;
     } else if (strcmp(argv[1], "timesync") == 0) {
         config->command = COMMAND_TIMESYNC;
     } else if (strcmp(argv[1], "audio") == 0) {
@@ -1952,6 +2092,7 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
             strcmp(arg, "--peer-id") == 0 ||
             strcmp(arg, "--token") == 0 ||
             strcmp(arg, "--iterations") == 0 ||
+            strcmp(arg, "--connections") == 0 ||
             strcmp(arg, "--repeat") == 0 ||
             strcmp(arg, "--interval-ms") == 0 ||
             strcmp(arg, "--timeout-ms") == 0 ||
@@ -1978,6 +2119,9 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
                 config->token = argv[i + 1];
             } else if (strcmp(arg, "--iterations") == 0 &&
                        parse_int_value(arg, argv[i + 1], 1, 10000, &config->iterations) != 0) {
+                return -1;
+            } else if (strcmp(arg, "--connections") == 0 &&
+                       parse_int_value(arg, argv[i + 1], 1, 10000, &config->connections) != 0) {
                 return -1;
             } else if (strcmp(arg, "--repeat") == 0 &&
                        parse_int_value(arg, argv[i + 1], 1, 10000, &config->repeat) != 0) {
@@ -2206,7 +2350,8 @@ int main(int argc, char **argv)
     signal(SIGTERM, signal_handler);
 
     log_message(stdout, "TiRTC version: %s", TiRtcGetVersion());
-    if (config.command == COMMAND_CONNECT || config.command == COMMAND_AUDIO) {
+    if (config.command == COMMAND_CONNECT || config.command == COMMAND_IDLE ||
+        config.command == COMMAND_AUDIO) {
         rc = sdk_start_with_retry(&config);
     } else {
         rc = sdk_start(&config);
@@ -2219,6 +2364,9 @@ int main(int argc, char **argv)
     switch (config.command) {
     case COMMAND_CONNECT:
         rc = run_connect_command(&config);
+        break;
+    case COMMAND_IDLE:
+        rc = run_idle_command(&config);
         break;
     case COMMAND_TIMESYNC:
         rc = run_timesync_command(&config);
