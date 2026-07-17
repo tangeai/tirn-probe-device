@@ -2186,11 +2186,29 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
 static int sdk_start(const probe_config_t *config)
 {
     char *client_id;
+    int max_connections;
     int rc;
 
     client_id = build_client_id(config->device_id);
     if (client_id == NULL) {
         return -1;
+    }
+
+    if (config->command == COMMAND_IDLE) {
+        max_connections = config->connections;
+        rc = TiRtcSetOption(TIRTC_OPT_MAX_CONNECTIONS,
+                            &max_connections,
+                            sizeof(max_connections));
+        if (rc != 0) {
+            log_message(stderr,
+                        "failed to set TiRTC max connections=%d: rc=%d error=%s",
+                        max_connections,
+                        rc,
+                        TiRtcGetErrorStr(rc));
+            free(client_id);
+            return rc;
+        }
+        log_message(stdout, "TiRTC max connections: %d", max_connections);
     }
 
     if (TiRtcSetOption(TIRTC_OPT_MAX_SEND_BUFFER,

@@ -7,7 +7,10 @@ RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY build/linux-x86_64/tirtc_accel_device_probe /usr/local/bin/tirtc_accel_device_probe
+COPY docker/probe-runner/entrypoint.sh /usr/local/bin/probe-runner-entrypoint
 
-RUN chmod 0755 /usr/local/bin/tirtc_accel_device_probe
+RUN chmod 0755 /usr/local/bin/tirtc_accel_device_probe /usr/local/bin/probe-runner-entrypoint
 
 WORKDIR /work
+
+ENTRYPOINT ["/usr/local/bin/probe-runner-entrypoint"]

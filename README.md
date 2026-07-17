@@ -93,6 +93,16 @@ build/linux-x86_64/tirtc_accel_device_probe
 输出包含成功建立数、峰值并发数、保持结束时的存活连接数、异常断连数及建连耗时分位值。目标服务所用
 token 必须允许重复建连；同时注意单个进程的文件描述符限制应高于目标连接数。
 
+`idle` 模式会在 `TiRtcInit()` 前将 `TIRTC_OPT_MAX_CONNECTIONS` 设置为 `--connections`，确保 SDK 按目标
+并发量规划连接资源。probe runner 镜像启动时会尝试启用 unlimited core dump；Docker hard limit 不允许时会
+输出告警。需要可靠保留崩溃 core 时应显式运行：
+
+```sh
+docker run --ulimit core=-1 --ulimit nofile=65535:65535 ...
+```
+
+core 文件的实际位置仍由宿主机 `kernel.core_pattern` 决定。
+
 ### 设备对时和设备到服务端延迟估算
 
 ```sh
