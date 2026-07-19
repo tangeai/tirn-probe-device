@@ -3,6 +3,9 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+monitor_pid=$$
+monitor_started_at=$(date -Iseconds)
+monitor_run_id="$(date '+%Y%m%d_%H%M%S')_p${monitor_pid}"
 
 if [ -f "$script_dir/.env" ]; then
   set -a
@@ -12,15 +15,18 @@ fi
 
 image=${PROBE_IMAGE:-docker-hub.tange365.com/runtime/tirtc-accel-probe-runner:test}
 state_dir=${STATE_DIR:-$repo_root/reports/.probe-image-audio-monitor}
-last_image_file=$state_dir/last-tested-image-id
+last_image_file=$state_dir/last-tested-connect-audio-image-id
 lock_dir=$state_dir/lock
+lock_owner_file=$lock_dir/owner
 reports_root=${REPORTS_ROOT:-$repo_root/reports}
 rsync_destination=47.119.170.85::temp/
 
-# Run the same Audio netem matrix as the report runner by default.
+# Run the same Connect + Audio netem matrix as the report runner by default.
 # Override these values to narrow the matrix for smoke testing.
 delays_ms=${DELAYS_MS:-0,25,50,100,150}
 losses=${LOSSES:-0,10,30,50}
+test_commands=${TEST_COMMANDS:-connect,audio}
+connect_iterations=${CONNECT_ITERATIONS:-20}
 audio_iterations=${AUDIO_ITERATIONS:-10}
 duration_ms=${DURATION_MS:-90000}
 audio_input=${AUDIO_INPUT:-$repo_root/docker/probe-runner/audio/send_audio_16k.opus}
@@ -37,11 +43,13 @@ extract_container=
 support_script_dir=
 
 log() {
-  printf '[probe-image-monitor] %s\n' "$*"
+  printf '[probe-image-monitor pid=%s run=%s] %s\n' \
+    "$monitor_pid" "$monitor_run_id" "$*"
 }
 
 fail() {
-  printf '[probe-image-monitor] ERROR: %s\n' "$*" >&2
+  printf '[probe-image-monitor pid=%s run=%s] ERROR: %s\n' \
+    "$monitor_pid" "$monitor_run_id" "$*" >&2
   exit 1
 }
 
@@ -73,13 +81,19 @@ feishu_notify() {
   fi
 }
 
-completed_audio_cases() {
-  find "$report_dir" -type f -path '*/logs/audio_*.log.exit_code' -print 2>/dev/null |
+completed_test_cases() {
+  find "$report_dir" -type f \( \
+      -path '*/logs/connect_*.log.exit_code' -o \
+      -path '*/logs/audio_*.log.exit_code' \
+    \) -print 2>/dev/null |
     wc -l | tr -d ' '
 }
 
-current_audio_case() {
-  find "$report_dir" -type f -path '*/logs/audio_*.log' -print 2>/dev/null |
+current_test_case() {
+  find "$report_dir" -type f \( \
+      -path '*/logs/connect_*.log' -o \
+      -path '*/logs/audio_*.log' \
+    \) -print 2>/dev/null |
   while IFS= read -r current; do
     [ -f "$current.exit_code" ] && continue
     basename "$current" .log
@@ -90,9 +104,9 @@ progress_loop() {
   while :; do
     sleep "$feishu_notify_interval_sec"
     elapsed_sec=$(($(date '+%s') - test_started_epoch))
-    completed=$(completed_audio_cases)
-    current=$(current_audio_case)
-    feishu_notify "TiRTC Probe 音频测试进度
+    completed=$(completed_test_cases)
+    current=$(current_test_case)
+    feishu_notify "TiRTC Probe Connect + Audio 测试进度
 镜像: $image
 镜像ID: $short_id
 进度: $completed/$total_cases 个用例完成
@@ -118,6 +132,7 @@ cleanup() {
   if [ -n "$extract_container" ]; then
     docker rm -f "$extract_container" >/dev/null 2>&1 || true
   fi
+  rm -f "$lock_owner_file"
   rmdir "$lock_dir" 2>/dev/null || true
 }
 
@@ -172,6 +187,14 @@ esac
 validate_flag FORCE_TEST "$force_test"
 validate_flag SKIP_PULL "$skip_pull"
 validate_flag SKIP_UPLOAD "$skip_upload"
+command_count=0
+for test_command in $(csv_words "$test_commands"); do
+  case "$test_command" in
+    connect|audio) command_count=$((command_count + 1)) ;;
+    *) fail "TEST_COMMANDS contains unsupported command: $test_command" ;;
+  esac
+done
+[ "$command_count" -gt 0 ] || fail 'TEST_COMMANDS must select connect, audio, or both'
 if [ -n "$feishu_webhook_url" ]; then
   command -v curl >/dev/null 2>&1 || fail 'curl is required when FEISHU_WEBHOOK_URL is configured'
   case "$feishu_notify_interval_sec" in
@@ -183,9 +206,19 @@ fi
 
 mkdir -p "$state_dir" "$reports_root"
 if ! mkdir "$lock_dir" 2>/dev/null; then
-  fail "another monitor run is active: $lock_dir"
+  lock_owner=unknown
+  if [ -f "$lock_owner_file" ]; then
+    lock_owner=$(tr '\n' ' ' <"$lock_owner_file")
+  fi
+  fail "another monitor run is active: $lock_dir owner=[$lock_owner]"
 fi
 trap cleanup EXIT INT TERM
+{
+  printf 'pid=%s\n' "$monitor_pid"
+  printf 'run_id=%s\n' "$monitor_run_id"
+  printf 'started_at=%s\n' "$monitor_started_at"
+  printf 'hostname=%s\n' "$(hostname)"
+} >"$lock_owner_file"
 
 before_id=$(image_id)
 log "checking image: $image"
@@ -211,16 +244,17 @@ if [ "$force_test" = 0 ] && [ "$after_id" = "$last_tested_id" ]; then
   exit 0
 fi
 
+total_scenarios=0
 total_cases=0
 for loss in $(csv_words "$losses"); do
   for delay_ms in $(csv_words "$delays_ms"); do
-    total_cases=$((total_cases + 1))
+    total_scenarios=$((total_scenarios + 1))
+    total_cases=$((total_cases + command_count))
   done
 done
 
-timestamp=$(date '+%Y%m%d_%H%M%S')
 short_id=$(printf '%s' "$after_id" | sed 's/^sha256://' | cut -c1-12)
-report_name="probe_audio_${short_id}_${timestamp}"
+report_name="probe_connect_audio_${short_id}_${monitor_run_id}"
 report_dir="$reports_root/$report_name"
 archive="$reports_root/$report_name.tar.gz"
 
@@ -230,16 +264,26 @@ run_one_case() {
   case_index=$3
   case_report_dir="$report_dir/cases/delay_${case_delay}_loss_${case_loss}"
   subnet_octet=$((20 + case_index * 2))
+  case_filter=
+  for test_command in $(csv_words "$test_commands"); do
+    selected_case="$test_command:$case_delay:$case_loss"
+    if [ -n "$case_filter" ]; then
+      case_filter="$case_filter,$selected_case"
+    else
+      case_filter=$selected_case
+    fi
+  done
   PROBE_IMAGE="$image" \
   DELAYS_MS="$case_delay" \
   LOSSES="$case_loss" \
   LOSS_PROFILE="$loss_profile" \
   NETEM_DIRECTION="$netem_direction" \
   NETEM_SUBNET_OCTET="$subnet_octet" \
+  CONNECT_ITERATIONS="$connect_iterations" \
   AUDIO_ITERATIONS="$audio_iterations" \
   DURATION_MS="$duration_ms" \
   AUDIO_INPUT="$audio_input" \
-  CASE_FILTER="audio:${case_delay}:${case_loss}" \
+  CASE_FILTER="$case_filter" \
   REPORT_DIR="$case_report_dir" \
     "$support_script_dir/run_accel_probe_netem_report.sh"
 }
@@ -261,7 +305,7 @@ run_parallel_matrix() {
   for case_loss in $(csv_words "$losses"); do
     for case_delay in $(csv_words "$delays_ms"); do
       case_index=$((case_index + 1))
-      log "starting parallel case $case_index/$total_cases: delay=${case_delay}ms uplink_loss=${case_loss}%"
+      log "starting parallel scenario $case_index/$total_scenarios: delay=${case_delay}ms uplink_loss=${case_loss}% commands=$test_commands"
       run_one_case "$case_delay" "$case_loss" "$case_index" &
       batch_pids="$batch_pids $!"
       batch_count=$((batch_count + 1))
@@ -299,6 +343,8 @@ merge_case_reports() {
   {
     printf 'delays_ms=%s\n' "$delays_ms"
     printf 'losses=%s\n' "$losses"
+    printf 'test_commands=%s\n' "$test_commands"
+    printf 'connect_iterations=%s\n' "$connect_iterations"
     printf 'audio_iterations=%s\n' "$audio_iterations"
     printf 'duration_ms=%s\n' "$duration_ms"
     printf 'direction=%s\n' "$netem_direction"
@@ -309,15 +355,17 @@ merge_case_reports() {
     --report-dir "$report_dir" --output "$report_dir/report.md"
 }
 
-log "new image detected; running audio tests: delays=$delays_ms losses=$losses loss_profile=$loss_profile direction=$netem_direction iterations=$audio_iterations duration_ms=$duration_ms parallel_jobs=$parallel_jobs"
-feishu_notify "TiRTC Probe 发现新镜像，开始音频测试
+log "new image detected; running tests: commands=$test_commands delays=$delays_ms losses=$losses loss_profile=$loss_profile direction=$netem_direction connect_iterations=$connect_iterations audio_iterations=$audio_iterations duration_ms=$duration_ms parallel_jobs=$parallel_jobs"
+feishu_notify "TiRTC Probe 发现新镜像，开始 Connect + Audio 测试
 镜像: $image
 镜像ID: $short_id
 用例数: $total_cases
 Loss方向: $loss_profile
 Delay方向: $netem_direction
-每用例轮数: $audio_iterations
-每轮时长: ${duration_ms}ms
+测试类型: $test_commands
+Connect 每用例轮数: $connect_iterations
+Audio 每用例轮数: $audio_iterations
+Audio 每轮时长: ${duration_ms}ms
 并行数: $parallel_jobs
 报告目录: $report_name"
 test_started_epoch=$(date '+%s')
@@ -333,11 +381,18 @@ stop_progress_loop
 merge_case_reports || fail 'failed to merge parallel case reports'
 
 failed_cases=0
-for exit_file in "$report_dir"/logs/audio_*.log.exit_code; do
+failed_connect_cases=0
+failed_audio_cases=0
+for exit_file in "$report_dir"/logs/connect_*.log.exit_code \
+    "$report_dir"/logs/audio_*.log.exit_code; do
   [ -f "$exit_file" ] || continue
   rc=$(sed -n '1p' "$exit_file")
   if [ "$rc" != 0 ]; then
     failed_cases=$((failed_cases + 1))
+    case "$(basename "$exit_file")" in
+      connect_*) failed_connect_cases=$((failed_connect_cases + 1)) ;;
+      audio_*) failed_audio_cases=$((failed_audio_cases + 1)) ;;
+    esac
   fi
 done
 
@@ -345,13 +400,15 @@ done
 {
   printf 'monitor_image_id=%s\n' "$after_id"
   printf 'monitor_runner_exit_code=%s\n' "$runner_rc"
-  printf 'monitor_failed_audio_cases=%s\n' "$failed_cases"
+  printf 'monitor_failed_connect_cases=%s\n' "$failed_connect_cases"
+  printf 'monitor_failed_audio_cases=%s\n' "$failed_audio_cases"
+  printf 'monitor_failed_cases=%s\n' "$failed_cases"
 } >>"$report_dir/environment.txt"
 
 tar -czf "$archive" -C "$reports_root" "$report_name"
 [ -f "$archive" ] || fail "archive was not generated: $archive"
 log "prepared archive: $archive"
-feishu_notify "TiRTC Probe 音频测试执行结束，正在上传结果
+feishu_notify "TiRTC Probe Connect + Audio 测试执行结束，正在上传结果
 镜像ID: $short_id
 测试脚本退出码: $runner_rc
 失败用例数: $failed_cases
@@ -364,13 +421,13 @@ else
 fi
 
 if [ "$runner_rc" -ne 0 ] || [ "$failed_cases" -ne 0 ]; then
-  feishu_notify "TiRTC Probe 音频测试失败
+  feishu_notify "TiRTC Probe Connect + Audio 测试失败
 镜像ID: $short_id
 测试脚本退出码: $runner_rc
 失败用例数: $failed_cases
 测试数据压缩包: $(basename "$archive")
 下次检查将自动重试"
-  fail "audio test failed (runner_rc=$runner_rc failed_cases=$failed_cases); image remains pending for retry"
+  fail "connect/audio test failed (runner_rc=$runner_rc failed_cases=$failed_cases); image remains pending for retry"
 fi
 
 if [ "$skip_upload" = 0 ]; then
@@ -383,7 +440,7 @@ if [ "$skip_upload" = 0 ]; then
   log "uploaded archive: $rsync_destination$(basename "$archive")"
   log "intranet download: rsync 172.18.144.119::temp/$(basename "$archive") $(basename "$archive")"
 fi
-feishu_notify "TiRTC Probe 音频测试完成
+feishu_notify "TiRTC Probe Connect + Audio 测试完成
 镜像ID: $short_id
 用例: $total_cases/$total_cases 成功
 报告压缩包: $(basename "$archive")
