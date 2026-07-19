@@ -33,9 +33,11 @@ timesync_timeout_ms=${TIMESYNC_TIMEOUT_MS:-1000}
 probe_start_retries=${PROBE_START_RETRIES:-3}
 probe_retry_delay_sec=${PROBE_RETRY_DELAY_SEC:-2}
 audio_iterations=${AUDIO_ITERATIONS:-20}
-duration_ms=${DURATION_MS:-10000}
+duration_ms=${DURATION_MS:-90000}
 frame_ms=${FRAME_MS:-40}
 audio_sample_log=${AUDIO_SAMPLE_LOG:-}
+audio_input=${AUDIO_INPUT:-}
+audio_echo_output=${AUDIO_ECHO_OUTPUT:-}
 audio_timesync_repeat=${AUDIO_TIMESYNC_REPEAT:-$timesync_repeat}
 tcpdump=${TCPDUMP:-0}
 tcpdump_filter=${TCPDUMP_FILTER:-udp or tcp}
@@ -81,9 +83,11 @@ Optional environment variables:
   TIMESYNC_INTERVAL_MS=100
   TIMESYNC_TIMEOUT_MS=1000
   AUDIO_ITERATIONS=20
-  DURATION_MS=10000
+  DURATION_MS=90000
   FRAME_MS=40
   AUDIO_SAMPLE_LOG=/path/to/audio-samples.csv  # optional; audio only
+  AUDIO_INPUT=/path/to/send_audio.opus          # optional; audio only
+  AUDIO_ECHO_OUTPUT=/path/to/received.opus      # requires AUDIO_INPUT
   AUDIO_TIMESYNC_REPEAT=20
   TCPDUMP=0|1
   TCPDUMP_FILTER="udp or tcp"
@@ -108,6 +112,11 @@ require_value DEVICE_ID "$device_id"
 require_value DEVICE_SECRET_KEY "$device_secret_key"
 require_value PEER_ID "$peer_id"
 require_value TOKEN "$token"
+
+if [ -n "$audio_echo_output" ] && [ -z "$audio_input" ]; then
+  printf '%s\n' '[netem-gateway] AUDIO_ECHO_OUTPUT requires AUDIO_INPUT' >&2
+  exit 1
+fi
 
 case "$netem_direction" in
   uplink|downlink|both) ;;
@@ -161,7 +170,29 @@ if [ -n "$audio_sample_log" ]; then
   mkdir -p "$audio_sample_dir"
   audio_sample_dir=$(CDPATH= cd -- "$audio_sample_dir" && pwd)
   container_audio_sample_log="/audio-samples/$audio_sample_name"
-  set -- -v "$audio_sample_dir:/audio-samples"
+  set -- "$@" -v "$audio_sample_dir:/audio-samples"
+fi
+
+container_audio_input=
+if [ -n "$audio_input" ]; then
+  if [ ! -f "$audio_input" ]; then
+    printf '[netem-gateway] audio input does not exist: %s\n' "$audio_input" >&2
+    exit 1
+  fi
+  audio_input_dir=$(CDPATH= cd -- "$(dirname "$audio_input")" && pwd)
+  audio_input_name=$(basename "$audio_input")
+  container_audio_input="/audio-input/$audio_input_name"
+  set -- "$@" -v "$audio_input_dir:/audio-input:ro"
+fi
+
+container_audio_echo_output=
+if [ -n "$audio_echo_output" ]; then
+  audio_echo_dir=$(dirname "$audio_echo_output")
+  audio_echo_name=$(basename "$audio_echo_output")
+  mkdir -p "$audio_echo_dir"
+  audio_echo_dir=$(CDPATH= cd -- "$audio_echo_dir" && pwd)
+  container_audio_echo_output="/audio-echo-output/$audio_echo_name"
+  set -- "$@" -v "$audio_echo_dir:/audio-echo-output"
 fi
 
 printf '[netem-gateway] starting gateway: loss=%s%% uplink_loss=%s%% downlink_loss=%s%% delay=%sms direction=%s gateway=%s probe=%s cpu=%s probe_net=%s uplink_net=%s\n' \
@@ -248,6 +279,8 @@ docker run --rm \
   -e DURATION_MS="$duration_ms" \
   -e FRAME_MS="$frame_ms" \
   -e AUDIO_SAMPLE_LOG="$container_audio_sample_log" \
+  -e AUDIO_INPUT="$container_audio_input" \
+  -e AUDIO_ECHO_OUTPUT="$container_audio_echo_output" \
   -e AUDIO_TIMESYNC_REPEAT="$audio_timesync_repeat" \
   -e TCPDUMP="$tcpdump" \
   -e TCPDUMP_FILTER="$tcpdump_filter" \
@@ -311,8 +344,15 @@ docker run --rm \
         tail -f /dev/null
         ;;
       audio)
-        printf "[netem-gateway] probe command: /usr/local/bin/tirtc_accel_device_probe audio --endpoint %s --device-id %s --device-secret-key *** --peer-id %s --token *** --repeat %s --interval-ms %s --timeout-ms %s --audio-iterations %s --duration-ms %s --frame-ms %s --audio-sample-log %s\n" \
-          "$ENDPOINT" "$DEVICE_ID" "$PEER_ID" "$AUDIO_TIMESYNC_REPEAT" "$TIMESYNC_INTERVAL_MS" "$TIMESYNC_TIMEOUT_MS" "$AUDIO_ITERATIONS" "$DURATION_MS" "$FRAME_MS" "$AUDIO_SAMPLE_LOG"
+        set --
+        if [ -n "$AUDIO_INPUT" ]; then
+          set -- "$@" --audio-input "$AUDIO_INPUT"
+        fi
+        if [ -n "$AUDIO_ECHO_OUTPUT" ]; then
+          set -- "$@" --audio-echo-output "$AUDIO_ECHO_OUTPUT"
+        fi
+        printf "[netem-gateway] probe audio files: input=%s echo_output=%s sample_log=%s\n" \
+          "$AUDIO_INPUT" "$AUDIO_ECHO_OUTPUT" "$AUDIO_SAMPLE_LOG"
         /usr/local/bin/tirtc_accel_device_probe audio \
           --endpoint "$ENDPOINT" \
           --device-id "$DEVICE_ID" \
@@ -325,7 +365,8 @@ docker run --rm \
           --audio-iterations "$AUDIO_ITERATIONS" \
           --duration-ms "$DURATION_MS" \
           --frame-ms "$FRAME_MS" \
-          --audio-sample-log "$AUDIO_SAMPLE_LOG"
+          --audio-sample-log "$AUDIO_SAMPLE_LOG" \
+          "$@"
         exit $?
         ;;
       connect)

@@ -11,7 +11,7 @@ losses=${LOSSES:-0,5,10,20}
 delays_ms=${DELAYS_MS:-0,50,100}
 command=${COMMAND:-audio}
 audio_iterations=${AUDIO_ITERATIONS:-20}
-duration_ms=${DURATION_MS:-10000}
+duration_ms=${DURATION_MS:-90000}
 frame_ms=${FRAME_MS:-40}
 
 endpoint=${ENDPOINT:-}
@@ -33,7 +33,7 @@ Optional environment variables:
   DELAYS_MS=0,50,100
   COMMAND=audio|connect|timesync
   AUDIO_ITERATIONS=20
-  DURATION_MS=10000
+  DURATION_MS=90000
   FRAME_MS=40
 USAGE
 }

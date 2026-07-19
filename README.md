@@ -103,6 +103,33 @@ docker run --ulimit core=-1 --ulimit nofile=65535:65535 ...
 
 core 文件的实际位置仍由宿主机 `kernel.core_pattern` 决定。
 
+`script/run_accel_probe_idle_1000.sh` 会将总连接数拆成多个同时运行的 probe 进程，避免单个进程在约 300 多个
+连接时触发资源或缓冲区限制。默认每个进程最多建立 300 个连接：
+
+```sh
+CONNECTIONS=1000 \
+CONNECTIONS_PER_PROCESS=300 \
+DURATION_MS=600000 \
+./script/run_accel_probe_idle_1000.sh
+```
+
+以上配置会同时运行 4 个 worker，连接数分别为 300、300、300、100。每个 worker 使用独立容器和日志；脚本
+也可被多次同时启动，运行 ID 中包含时间与进程号，不会互相覆盖容器名或日志。按 `Ctrl-C` 会清理本次启动的
+所有 worker 容器。
+
+TGWebRTC 的 `[RTC_THREAD_STAT]` 是底层通过 `printf` 直接输出的耗时诊断信息，不受 `LOG_LEVEL` 控制。
+脚本默认过滤这些日志。需要保留全部或抽样保留时，可设置：
+
+```sh
+# 保留全部
+RTC_THREAD_STAT_SAMPLE_EVERY=1 ./script/run_accel_probe_idle_1000.sh
+
+# 每 100 条保留 1 条
+RTC_THREAD_STAT_SAMPLE_EVERY=100 ./script/run_accel_probe_idle_1000.sh
+```
+
+`RTC_THREAD_STAT_SAMPLE_EVERY=0` 表示全部过滤，也是默认值。每个 worker 结束时会输出被过滤的总行数。
+
 ### 设备对时和设备到服务端延迟估算
 
 ```sh

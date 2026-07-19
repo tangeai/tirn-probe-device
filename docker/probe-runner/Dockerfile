@@ -1,13 +1,21 @@
-FROM docker-hub.tange365.com/public/ubuntu:22.04 AS builder
+ARG PROBE_BUILDER_IMAGE=docker-hub.tange365.com/public/ubuntu:22.04
+ARG PROBE_RUNTIME_IMAGE=docker-hub.tange365.com/public/ubuntu:22.04
+ARG PROBE_INSTALL_PACKAGES=1
+FROM ${PROBE_BUILDER_IMAGE} AS builder
 
 ARG TIRTC_STANDARD_SDK_URL
 ARG TIRTC_DESKTOP_SDK_URL
+ARG PROBE_INSTALL_PACKAGES
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 update \
-    && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 install -y --no-install-recommends build-essential ca-certificates curl make \
-    && rm -rf /var/lib/apt/lists/*
+RUN if [ "$PROBE_INSTALL_PACKAGES" = 1 ]; then \
+      apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 update \
+      && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 install -y --no-install-recommends build-essential ca-certificates curl make \
+      && rm -rf /var/lib/apt/lists/*; \
+    else \
+      command -v cc && command -v curl && command -v make; \
+    fi
 
 WORKDIR /src
 COPY Makefile /src/Makefile
@@ -39,25 +47,46 @@ RUN make PLATFORM=linux-x86_64 \
         TIRTC_SDK_SOURCE_URL="$TIRTC_DESKTOP_SDK_URL" \
         probe
 
-FROM docker-hub.tange365.com/public/ubuntu:22.04
+FROM ${PROBE_RUNTIME_IMAGE}
+
+ARG PROBE_INSTALL_PACKAGES
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 update \
-    && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 install -y --no-install-recommends ca-certificates iproute2 iptables iputils-ping libstdc++6 tcpdump \
-    && rm -rf /var/lib/apt/lists/*
+RUN if [ "$PROBE_INSTALL_PACKAGES" = 1 ]; then \
+      apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 update \
+      && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 install -y --no-install-recommends ca-certificates iproute2 iptables iputils-ping libstdc++6 tcpdump \
+      && rm -rf /var/lib/apt/lists/*; \
+    else \
+      command -v ip && command -v iptables && command -v ping && command -v tcpdump; \
+    fi
 
 COPY --from=builder /src/build/standard/linux-x86_64/tirtc_accel_device_probe /usr/local/libexec/tirtc_accel_device_probe-standard
 COPY --from=builder /src/build/desktop/linux-x86_64/tirtc_accel_device_probe /usr/local/libexec/tirtc_accel_device_probe-desktop
 COPY --from=builder /opt/tirtc-sdk/desktop/lib/libwebrtc.so /opt/tirtc/desktop/lib/libwebrtc.so
 COPY docker/probe-runner/select-probe.sh /usr/local/bin/tirtc_accel_device_probe
 COPY docker/probe-runner/entrypoint.sh /usr/local/bin/probe-runner-entrypoint
+COPY docker/probe-runner/audio /opt/tirtc-probe-tests/audio
+COPY script/run_accel_probe_with_netem_gateway.sh /opt/tirtc-probe-tests/script/
+COPY script/run_accel_probe_netem_report.sh /opt/tirtc-probe-tests/script/
+COPY script/run_accel_probe_case.py /opt/tirtc-probe-tests/script/
+COPY script/generate_accel_probe_netem_report.py /opt/tirtc-probe-tests/script/
+COPY script/run_accel_probe_idle_1000.sh /opt/tirtc-probe-tests/script/
 
 RUN chmod 0755 \
       /usr/local/bin/tirtc_accel_device_probe \
       /usr/local/bin/probe-runner-entrypoint \
       /usr/local/libexec/tirtc_accel_device_probe-standard \
-      /usr/local/libexec/tirtc_accel_device_probe-desktop
+      /usr/local/libexec/tirtc_accel_device_probe-desktop \
+      /opt/tirtc-probe-tests/script/run_accel_probe_with_netem_gateway.sh \
+      /opt/tirtc-probe-tests/script/run_accel_probe_netem_report.sh \
+      /opt/tirtc-probe-tests/script/run_accel_probe_case.py \
+      /opt/tirtc-probe-tests/script/generate_accel_probe_netem_report.py \
+      /opt/tirtc-probe-tests/script/run_accel_probe_idle_1000.sh
+
+ENV TIRTC_PROBE_TEST_ROOT=/opt/tirtc-probe-tests \
+    TIRTC_PROBE_AUDIO_8K=/opt/tirtc-probe-tests/audio/send_audio_8k.opus \
+    TIRTC_PROBE_AUDIO_16K=/opt/tirtc-probe-tests/audio/send_audio_16k.opus
 
 WORKDIR /work
 
