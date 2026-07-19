@@ -64,10 +64,10 @@ iteration,send_index,frame_ts_ms,send_ret,send_late_us,observed,echoed,client_se
         self.assertEqual(result["downlink_latency_avg"], "126.67")
         self.assertEqual(result["echo_latency_avg"], "32.50")
         self.assertEqual(result["frame_interval_avg"], "400.00")
-        self.assertEqual(result["stutter_avg"], "17.86")
+        self.assertEqual(result["stutter_avg"], "16.07")
         self.assertEqual(result["representative_iteration"], "1")
         self.assertEqual(result["representative_stutter_count"], "1")
-        self.assertEqual(result["representative_stutter_events"], [(0, 0, 400000)])
+        self.assertEqual(result["representative_stutter_events"], [(40000, 40000, 360000)])
         self.assertEqual(skipped_result["stutter_avg"], "0.00")
         self.assertEqual(skipped_result["representative_stutter_count"], "0")
         self.assertEqual(REPORT.infer_skip_frames([

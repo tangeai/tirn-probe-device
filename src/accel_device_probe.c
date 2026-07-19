@@ -858,7 +858,9 @@ static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *d
     int64_t now_unix_ns;
     audio_sample_t *sample;
     int64_t gap_us;
+    int64_t playback_gap_us = 0;
     uint32_t duration_samples;
+    int new_echo = 0;
 
     if (session == NULL || info == NULL || data == NULL) {
         return;
@@ -875,11 +877,14 @@ static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *d
     now_mono_us = monotonic_now_us();
     now_unix_ns = realtime_now_ns();
     duration_samples = info->media == TIRTC_AUDIO_OPUS ?
-        ogg_opus_packet_duration_samples_48k(data, info->length) : 0;
+        ogg_opus_packet_duration_samples_48k(data, info->length) :
+        (session->audio.expected_frame_ms > 0 ?
+         (uint32_t)session->audio.expected_frame_ms * 48U : 0);
 
     pthread_mutex_lock(&session->mutex);
     sample = audio_metrics_find(&session->audio, frame_ts_ms);
     if (sample != NULL && !sample->echoed) {
+        new_echo = 1;
         sample->client_echo_recv_mono_us = now_mono_us;
         sample->echoed = 1;
         session->audio.echo_count++;
@@ -890,20 +895,10 @@ static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *d
         if (session->audio.last_echo_recv_mono_us > 0) {
             gap_us = now_mono_us - session->audio.last_echo_recv_mono_us;
             sample->echo_arrival_gap_us = gap_us;
-            if (gap_us > 300000LL) {
-                int expected_frame_ms = session->audio.expected_frame_ms > 0 ?
-                    session->audio.expected_frame_ms :
-                    DEFAULT_FRAME_MS;
-                sample->stutter = 1;
-                sample->stutter_time_us = gap_us - (int64_t)expected_frame_ms * 1000LL;
-                session->audio.stutter_count++;
-                session->audio.stutter_time_us += sample->stutter_time_us;
-            }
         }
         session->audio.last_echo_recv_mono_us = now_mono_us;
     }
-    if (session->echo_writer_open && !session->echo_writer_error &&
-        info->media == TIRTC_AUDIO_OPUS && duration_samples > 0) {
+    if (new_echo && duration_samples > 0) {
         static const uint8_t opus_silence_20ms[] = {0xf8U, 0xffU, 0xfeU};
         uint64_t arrival_start_granule;
         uint64_t missing_samples;
@@ -917,10 +912,18 @@ static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *d
             (uint64_t)(now_mono_us - session->echo_timeline_origin_us) * 48U / 1000U;
         missing_samples = arrival_start_granule > session->echo_last_granule ?
             arrival_start_granule - session->echo_last_granule : 0;
+        playback_gap_us = (int64_t)(missing_samples * 1000U / 48U);
+        if (playback_gap_us > 300000LL && sample != NULL) {
+            sample->stutter = 1;
+            sample->stutter_time_us = playback_gap_us;
+            session->audio.stutter_count++;
+            session->audio.stutter_time_us += playback_gap_us;
+        }
         silence_frames = (missing_samples + 480U) / 960U;
         for (silence_index = 0; silence_index < silence_frames; ++silence_index) {
             session->echo_last_granule += 960U;
-            if (ogg_opus_writer_write(&session->echo_writer,
+            if (session->echo_writer_open && !session->echo_writer_error &&
+                ogg_opus_writer_write(&session->echo_writer,
                                       opus_silence_20ms,
                                       sizeof(opus_silence_20ms),
                                       session->echo_last_granule) != 0) {
@@ -928,9 +931,10 @@ static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *d
                 break;
             }
         }
-        if (!session->echo_writer_error) {
+        if (!session->echo_writer_open || !session->echo_writer_error) {
             session->echo_last_granule += duration_samples;
-            if (ogg_opus_writer_write(&session->echo_writer,
+            if (session->echo_writer_open && info->media == TIRTC_AUDIO_OPUS &&
+                ogg_opus_writer_write(&session->echo_writer,
                                       data,
                                       info->length,
                                       session->echo_last_granule) != 0) {
@@ -1730,6 +1734,8 @@ static int run_audio_iteration(probe_session_t *session,
     base_ts_ms = (uint32_t)(realtime_now_ns() / 1000000LL);
     pthread_mutex_lock(&session->mutex);
     audio_metrics_reset_iteration(&session->audio);
+    session->echo_timeline_origin_us = 0;
+    session->echo_last_granule = 0;
     session->audio.call_started_mono_us = start_us;
     session->audio.expected_frame_ms = input_opus == NULL ? config->frame_ms :
         (int)(input_opus->packets[0].duration_samples_48k / 48U);

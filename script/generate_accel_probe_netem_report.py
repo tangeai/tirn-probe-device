@@ -177,19 +177,41 @@ def read_audio_metrics(path, target_iterations=None, skip_frames=None, skip_dura
 
         retained_echoed_rows = [row for row in ordered if integer(row, "echoed") != 0]
         retained_stutter_rows = retained_echoed_rows[1:]
-        stutter_time_us = sum(
-            integer(row, "echo_arrival_gap_us")
-            for row in retained_stutter_rows
-            if integer(row, "echo_arrival_gap_us") > STUTTER_THRESHOLD_US
+        full_ordered = sorted(
+            all_iterations[iteration], key=lambda row: integer(row, "send_index")
         )
+        frame_times = sorted({integer(row, "frame_ts_ms") for row in full_ordered})
+        frame_durations = [right - left for left, right in zip(frame_times, frame_times[1:])
+                           if right > left]
+        frame_duration_us = int(percentile(frame_durations, 0.50) * 1000) \
+            if frame_durations else 0
+        echoed_by_arrival = sorted(
+            (row for row in full_ordered
+             if integer(row, "echoed") != 0 and integer(row, "client_echo_recv_unix_ns") > 0),
+            key=lambda row: integer(row, "client_echo_recv_unix_ns"),
+        )
+        playback_stutters = {}
+        if echoed_by_arrival:
+            first_echo_ns = integer(echoed_by_arrival[0], "client_echo_recv_unix_ns")
+            playback_end_us = 0
+            for row in echoed_by_arrival:
+                arrival_us = (integer(row, "client_echo_recv_unix_ns") - first_echo_ns) // 1000
+                playback_gap_us = max(0, arrival_us - playback_end_us)
+                if playback_gap_us > STUTTER_THRESHOLD_US:
+                    playback_stutters[integer(row, "send_index")] = (
+                        playback_end_us, playback_gap_us
+                    )
+                silence_frames = (playback_gap_us + 10000) // 20000
+                playback_end_us += silence_frames * 20000 + frame_duration_us
+        retained_ids = {integer(row, "send_index") for row in retained_stutter_rows}
+        retained_playback_stutters = {
+            send_index: event for send_index, event in playback_stutters.items()
+            if send_index in retained_ids
+        }
+        stutter_time_us = sum(gap_us for _, gap_us in retained_playback_stutters.values())
         call_duration_us = max((integer(row, "call_duration_us") for row in ordered), default=0)
         if call_duration_us <= 0 and ordered:
             send_times = [integer(row, "client_send_unix_ns") for row in ordered]
-            frame_times = sorted({integer(row, "frame_ts_ms") for row in ordered})
-            frame_durations = [right - left for left, right in zip(frame_times, frame_times[1:])
-                               if right > left]
-            frame_duration_us = int(percentile(frame_durations, 0.50) * 1000) \
-                if frame_durations else 0
             call_duration_us = max(send_times) // 1000 - min(send_times) // 1000
             call_duration_us += frame_duration_us + 1000000
         stutter_rate = stutter_time_us * 100.0 / call_duration_us \
@@ -197,25 +219,14 @@ def read_audio_metrics(path, target_iterations=None, skip_frames=None, skip_dura
         stutter_rates.append(stutter_rate)
         stutter_rates_by_iteration.append((stutter_rate, iteration))
 
-        full_ordered = sorted(
-            all_iterations[iteration], key=lambda row: integer(row, "send_index")
-        )
         echoed_rows = [row for row in full_ordered if integer(row, "echoed") != 0]
         first_echo_ns = integer(echoed_rows[0], "client_echo_recv_unix_ns") \
             if echoed_rows else 0
         analysis_origin_ns = integer(retained_echoed_rows[0], "client_echo_recv_unix_ns") \
             if retained_echoed_rows else first_echo_ns
         analysis_origin_us = max(0, (analysis_origin_ns - first_echo_ns) // 1000)
-        retained_ids = {integer(row, "send_index") for row in retained_stutter_rows}
         events = []
-        for row in echoed_rows:
-            if integer(row, "send_index") not in retained_ids:
-                continue
-            gap_us = integer(row, "echo_arrival_gap_us")
-            echo_recv_ns = integer(row, "client_echo_recv_unix_ns")
-            if gap_us <= STUTTER_THRESHOLD_US or echo_recv_ns <= 0 or first_echo_ns <= 0:
-                continue
-            start_us = max(0, (echo_recv_ns - first_echo_ns) // 1000 - gap_us)
+        for start_us, gap_us in retained_playback_stutters.values():
             analysis_start_us = max(0, start_us - analysis_origin_us)
             events.append((analysis_start_us, start_us, gap_us))
         stutter_events_by_iteration[iteration] = events
@@ -416,9 +427,9 @@ def main():
         "",
         "## 卡顿计算公式",
         "",
-        "- 相邻回声帧到达间隔：`gap_i = echo_recv_time_i - echo_recv_time_(i-1)`。",
-        "- 卡顿判定：当 `gap_i > 300ms` 时，该帧记为一次卡顿。",
-        "- 单次卡顿时长：`stutter_i = gap_i`，不扣减 `expected_frame_interval`。",
+        "- 播放缺口：`playback_gap_i = max(echo_arrival_i - playback_end_(i-1), 0)`。",
+        "- 卡顿判定：当 `playback_gap_i > 300ms` 时，该播放缺口记为一次卡顿。",
+        "- 单次卡顿时长：`stutter_i = playback_gap_i`。快速连续到达的帧排队播放，不产生负缺口。",
         "- 单轮卡顿占比：`stutter_rate = Σ stutter_i / call_duration × 100%`。",
         "- 表格中的卡顿平均/P50/P90/P95/P99，是先计算每轮卡顿占比，再对各成功轮次做分布统计。",
         "- 报告计算时每轮跳过约 10 秒起始帧；旧 CSV 没有 `call_duration_us` 时，分母按保留帧的发送时间跨度、末帧时长及 1 秒回声等待窗口推导。",

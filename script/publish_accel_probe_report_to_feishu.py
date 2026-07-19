@@ -282,7 +282,7 @@ def main():
     fetched = run([
         "lark-cli", "docs", "+fetch", "--doc", document_token, "--format", "pretty",
     ])
-    if "stutter_i = gap_i" not in fetched:
+    if "stutter_i = playback_gap_i" not in fetched:
         raise RuntimeError("verification failed: stutter formula missing")
     distribution_lines = ["平均", "P50", "P90", "P95", "P99"]
     if not re.search(
