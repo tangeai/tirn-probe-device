@@ -33,6 +33,8 @@ skip_upload=${SKIP_UPLOAD:-0}
 feishu_webhook_url=${FEISHU_WEBHOOK_URL:-}
 feishu_notify_interval_sec=${FEISHU_NOTIFY_INTERVAL_SEC:-60}
 progress_pid=
+extract_container=
+support_script_dir=
 
 log() {
   printf '[probe-image-monitor] %s\n' "$*"
@@ -113,7 +115,50 @@ cleanup() {
   for child_pid in ${batch_pids:-}; do
     kill "$child_pid" 2>/dev/null || true
   done
+  if [ -n "$extract_container" ]; then
+    docker rm -f "$extract_container" >/dev/null 2>&1 || true
+  fi
   rmdir "$lock_dir" 2>/dev/null || true
+}
+
+prepare_image_assets() {
+  asset_id=$(printf '%s' "$after_id" | sed 's/^sha256://' | cut -c1-64)
+  asset_root="$state_dir/image-assets/$asset_id"
+  support_script_dir="$asset_root/script"
+  image_audio_dir="$asset_root/audio"
+  if [ ! -f "$asset_root/.complete" ]; then
+    mkdir -p "$support_script_dir" "$image_audio_dir"
+    extract_container=$(docker create --platform linux/amd64 \
+      --entrypoint /bin/true "$image")
+    docker cp "$extract_container:/opt/tirtc-probe-tests/script/." "$support_script_dir/"
+    docker cp "$extract_container:/opt/tirtc-probe-tests/audio/." "$image_audio_dir/"
+    docker rm "$extract_container" >/dev/null
+    extract_container=
+    printf '%s\n' "$after_id" >"$asset_root/.complete"
+    log "extracted scripts and audio for image $asset_id to $asset_root"
+  else
+    log "using cached scripts and audio for image $asset_id from $asset_root"
+  fi
+  for required_script in run_accel_probe_netem_report.sh \
+      run_accel_probe_with_netem_gateway.sh run_accel_probe_case.py \
+      generate_accel_probe_netem_report.py; do
+    [ -f "$support_script_dir/$required_script" ] ||
+      fail "image is missing support script: $required_script"
+  done
+  chmod +x "$support_script_dir"/*.sh "$support_script_dir"/*.py
+
+  audio_name=$(basename "$audio_input")
+  case "$audio_name" in
+    send_audio_8k.opus|send_audio_16k.opus)
+      audio_input="$image_audio_dir/$audio_name"
+      [ -f "$audio_input" ] || fail "image is missing audio input: $audio_name"
+      ;;
+    *)
+      [ -f "$audio_input" ] || fail "missing custom audio input: $audio_input"
+      ;;
+  esac
+  log "selected image-matched support scripts: $support_script_dir"
+  log "selected audio input: $audio_input"
 }
 
 command -v docker >/dev/null 2>&1 || fail 'docker is required'
@@ -135,7 +180,6 @@ if [ -n "$feishu_webhook_url" ]; then
   esac
 fi
 [ -f "$script_dir/.env" ] || fail "missing test configuration: $script_dir/.env"
-[ -f "$audio_input" ] || fail "missing audio input: $audio_input"
 
 mkdir -p "$state_dir" "$reports_root"
 if ! mkdir "$lock_dir" 2>/dev/null; then
@@ -152,6 +196,7 @@ else
 fi
 after_id=$(image_id)
 [ -n "$after_id" ] || fail "cannot inspect image after pull: $image"
+prepare_image_assets
 
 last_tested_id=
 if [ -f "$last_image_file" ]; then
@@ -196,7 +241,7 @@ run_one_case() {
   AUDIO_INPUT="$audio_input" \
   CASE_FILTER="audio:${case_delay}:${case_loss}" \
   REPORT_DIR="$case_report_dir" \
-    "$script_dir/run_accel_probe_netem_report.sh"
+    "$support_script_dir/run_accel_probe_netem_report.sh"
 }
 
 wait_batch() {
@@ -260,7 +305,7 @@ merge_case_reports() {
     printf 'loss_profile=%s\n' "$loss_profile"
     printf 'parallel_jobs=%s\n' "$parallel_jobs"
   } >>"$report_dir/environment.txt"
-  python3 "$script_dir/generate_accel_probe_netem_report.py" \
+  python3 "$support_script_dir/generate_accel_probe_netem_report.py" \
     --report-dir "$report_dir" --output "$report_dir/report.md"
 }
 
