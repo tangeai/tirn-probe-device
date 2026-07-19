@@ -508,7 +508,7 @@ def main():
         lines += [
             "", "## 回声音频", "",
             "每个用例选择单轮卡顿占比最高的一轮作为代表；若多轮并列，则选择轮次号最大的一轮。", "",
-            "卡顿明细与表格指标均跳过每轮起始约 10 秒。分析窗口位置以跳过完成后的首个回声为 `0s`；完整音频位置以 WAV 起点为 `0s`，可用于播放器定位。", "",
+            "卡顿明细与表格指标均跳过每轮起始约 10 秒。完整音频位置以 WAV 起点为 `0s`，可用于播放器定位。", "",
         ]
         for (audio_label, delay, uplink_loss, downlink_loss, echo_audio_path,
              representative_iteration, representative_stutter_rate,
@@ -523,10 +523,9 @@ def main():
             ]
             if representative_stutter_events:
                 lines.extend(
-                    f"    - {index}. 分析窗口位置 `{analysis_start_us / 1000000.0:.3f}s`，"
-                    f"完整音频位置 `{audio_start_us / 1000000.0:.3f}s`，"
+                    f"    - {index}. 完整音频位置 `{audio_start_us / 1000000.0:.3f}s`，"
                     f"时长 `{gap_us / 1000.0:.2f}ms`"
-                    for index, (analysis_start_us, audio_start_us, gap_us)
+                    for index, (_analysis_start_us, audio_start_us, gap_us)
                     in enumerate(representative_stutter_events, 1)
                 )
             else:
