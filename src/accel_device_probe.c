@@ -24,6 +24,7 @@
 #endif
 
 #include "tiRTC.h"
+#include "ogg_opus.h"
 
 enum {
     CMD_TIME_SYNC_REQUEST = 0x2003,
@@ -85,6 +86,9 @@ typedef struct {
     int log_level;
     int json_output;
     const char *audio_sample_log;
+    const char *audio_input;
+    const char *audio_echo_output;
+    int duration_explicit;
 } probe_config_t;
 
 typedef struct {
@@ -157,6 +161,11 @@ typedef struct {
     int timesync_error;
     time_sync_sample_t timesync_sample;
     audio_metrics_t audio;
+    ogg_opus_writer_t echo_writer;
+    int echo_writer_open;
+    int echo_writer_error;
+    int64_t echo_timeline_origin_us;
+    uint64_t echo_last_granule;
 } probe_session_t;
 
 typedef enum {
@@ -849,6 +858,7 @@ static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *d
     int64_t now_unix_ns;
     audio_sample_t *sample;
     int64_t gap_us;
+    uint32_t duration_samples;
 
     if (session == NULL || info == NULL || data == NULL) {
         return;
@@ -864,6 +874,8 @@ static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *d
 
     now_mono_us = monotonic_now_us();
     now_unix_ns = realtime_now_ns();
+    duration_samples = info->media == TIRTC_AUDIO_OPUS ?
+        ogg_opus_packet_duration_samples_48k(data, info->length) : 0;
 
     pthread_mutex_lock(&session->mutex);
     sample = audio_metrics_find(&session->audio, frame_ts_ms);
@@ -889,6 +901,42 @@ static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *d
             }
         }
         session->audio.last_echo_recv_mono_us = now_mono_us;
+    }
+    if (session->echo_writer_open && !session->echo_writer_error &&
+        info->media == TIRTC_AUDIO_OPUS && duration_samples > 0) {
+        static const uint8_t opus_silence_20ms[] = {0xf8U, 0xffU, 0xfeU};
+        uint64_t arrival_start_granule;
+        uint64_t missing_samples;
+        uint64_t silence_frames;
+        uint64_t silence_index;
+
+        if (session->echo_timeline_origin_us == 0) {
+            session->echo_timeline_origin_us = now_mono_us;
+        }
+        arrival_start_granule =
+            (uint64_t)(now_mono_us - session->echo_timeline_origin_us) * 48U / 1000U;
+        missing_samples = arrival_start_granule > session->echo_last_granule ?
+            arrival_start_granule - session->echo_last_granule : 0;
+        silence_frames = (missing_samples + 480U) / 960U;
+        for (silence_index = 0; silence_index < silence_frames; ++silence_index) {
+            session->echo_last_granule += 960U;
+            if (ogg_opus_writer_write(&session->echo_writer,
+                                      opus_silence_20ms,
+                                      sizeof(opus_silence_20ms),
+                                      session->echo_last_granule) != 0) {
+                session->echo_writer_error = 1;
+                break;
+            }
+        }
+        if (!session->echo_writer_error) {
+            session->echo_last_granule += duration_samples;
+            if (ogg_opus_writer_write(&session->echo_writer,
+                                      data,
+                                      info->length,
+                                      session->echo_last_granule) != 0) {
+                session->echo_writer_error = 1;
+            }
+        }
     }
     pthread_mutex_unlock(&session->mutex);
 }
@@ -1589,6 +1637,7 @@ static void write_audio_sample_log(FILE *stream,
 
 static int run_audio_iteration(probe_session_t *session,
                                const probe_config_t *config,
+                               const ogg_opus_file_t *input_opus,
                                int64_t offset_ns,
                                int success_iteration,
                                int target_success_iterations,
@@ -1625,27 +1674,81 @@ static int run_audio_iteration(probe_session_t *session,
     int64_t sdk_send_cpu_ns = 0;
     int64_t post_send_cpu_ns = 0;
     size_t i;
+    size_t input_packet_index = 0;
+    uint64_t input_timeline_samples = 0;
+    char *echo_output_path = NULL;
+    uint8_t opus_audio_flags = 0;
 
     if (target_success_iterations > 1) {
         printf("音频测试轮次: 第 %d/%d 次\n", success_iteration, target_success_iterations);
     }
 
-    init_audio_tone_samples();
+    if (input_opus == NULL) {
+        init_audio_tone_samples();
+    } else {
+        int sample_rate_flag = input_opus->input_sample_rate == 16000U ? 1 : 0;
+        int channel_flag = input_opus->channels == 2U ? 2 : 0;
+        opus_audio_flags = (uint8_t)(sample_rate_flag + channel_flag);
+    }
+    if (config->audio_echo_output != NULL && config->audio_echo_output[0] != '\0') {
+        if (target_success_iterations == 1) {
+            echo_output_path = strdup(config->audio_echo_output);
+        } else {
+            const char *dot = strrchr(config->audio_echo_output, '.');
+            size_t prefix_len = dot == NULL ? strlen(config->audio_echo_output) :
+                (size_t)(dot - config->audio_echo_output);
+            const char *suffix = dot == NULL ? ".opus" : dot;
+            size_t needed = prefix_len + strlen(suffix) + 32U;
+            echo_output_path = (char *)malloc(needed);
+            if (echo_output_path != NULL) {
+                (void)snprintf(echo_output_path,
+                               needed,
+                               "%.*s.iteration-%d%s",
+                               (int)prefix_len,
+                               config->audio_echo_output,
+                               success_iteration,
+                               suffix);
+            }
+        }
+        if (echo_output_path == NULL ||
+            ogg_opus_writer_open(&session->echo_writer,
+                                 echo_output_path,
+                                 input_opus == NULL ? 1U : input_opus->channels,
+                                 input_opus == NULL ? 48000U : input_opus->input_sample_rate) != 0) {
+            log_message(stderr,
+                        "failed to open echo audio output %s: %s",
+                        echo_output_path == NULL ? config->audio_echo_output : echo_output_path,
+                        strerror(errno));
+            free(echo_output_path);
+            return 1;
+        }
+        session->echo_writer_open = 1;
+        log_message(stdout, "echo audio output: %s", echo_output_path);
+    }
     start_us = monotonic_now_us();
     next_send_us = start_us;
     base_ts_ms = (uint32_t)(realtime_now_ns() / 1000000LL);
     pthread_mutex_lock(&session->mutex);
     audio_metrics_reset_iteration(&session->audio);
     session->audio.call_started_mono_us = start_us;
-    session->audio.expected_frame_ms = config->frame_ms;
+    session->audio.expected_frame_ms = input_opus == NULL ? config->frame_ms :
+        (int)(input_opus->packets[0].duration_samples_48k / 48U);
     pthread_mutex_unlock(&session->mutex);
 
     loop_cpu_start_ns = thread_cpu_now_ns();
     while (!g_should_exit &&
-           monotonic_now_us() - start_us < (int64_t)config->duration_ms * 1000LL) {
+           (input_opus == NULL || input_packet_index < input_opus->len) &&
+           (!config->duration_explicit ||
+            monotonic_now_us() - start_us < (int64_t)config->duration_ms * 1000LL) &&
+           (input_opus != NULL ||
+            monotonic_now_us() - start_us < (int64_t)config->duration_ms * 1000LL)) {
         int64_t now_us = monotonic_now_us();
         if (now_us >= next_send_us) {
-            uint8_t payload[AUDIO_PAYLOAD_BYTES];
+            uint8_t tone_payload[AUDIO_PAYLOAD_BYTES];
+            const uint8_t *payload;
+            uint32_t payload_len;
+            uint32_t packet_duration_samples;
+            int packet_duration_ms;
             TIRTCFRAMEINFO info;
             uint32_t frame_ts_ms;
             uint32_t frame_index;
@@ -1658,15 +1761,28 @@ static int run_audio_iteration(probe_session_t *session,
 
             pthread_mutex_lock(&session->mutex);
             frame_index = ++session->audio.next_frame_index;
-            frame_ts_ms = base_ts_ms +
-                (frame_index - 1U) * (uint32_t)config->frame_ms;
+            if (input_opus != NULL) {
+                const ogg_opus_packet_t *packet = &input_opus->packets[input_packet_index];
+                packet_duration_samples = packet->duration_samples_48k;
+                packet_duration_ms = (int)(packet_duration_samples / 48U);
+                frame_ts_ms = base_ts_ms + (uint32_t)(input_timeline_samples / 48U);
+                payload = packet->data;
+                payload_len = (uint32_t)packet->len;
+            } else {
+                packet_duration_ms = config->frame_ms;
+                packet_duration_samples = (uint32_t)packet_duration_ms * 48U;
+                frame_ts_ms = base_ts_ms +
+                    (frame_index - 1U) * (uint32_t)config->frame_ms;
+                payload = tone_payload;
+                payload_len = AUDIO_PAYLOAD_BYTES;
+            }
             if (session->audio.first_client_send_unix_ns == 0) {
                 session->audio.first_client_send_unix_ns = send_unix_ns;
             }
             if (send_late_us > session->audio.max_send_late_us) {
                 session->audio.max_send_late_us = send_late_us;
             }
-            if (send_late_us > (int64_t)config->frame_ms * 1000LL) {
+            if (send_late_us > (int64_t)packet_duration_ms * 1000LL) {
                 session->audio.late_send_count++;
             }
             if (audio_metrics_append(&session->audio,
@@ -1685,13 +1801,15 @@ static int run_audio_iteration(probe_session_t *session,
             prepare_cpu_ns += thread_cpu_now_ns() - segment_cpu_start_ns;
 
             segment_cpu_start_ns = thread_cpu_now_ns();
-            make_audio_payload(payload, frame_index);
+            if (input_opus == NULL) {
+                make_audio_payload(tone_payload, frame_index);
+            }
             memset(&info, 0, sizeof(info));
             info.stream_id = AUDIO_STREAM_ID;
-            info.media = TIRTC_AUDIO_PCM;
-            info.flags = TIRTC_AUDIOSAMPLE_8K16B1C;
+            info.media = input_opus == NULL ? TIRTC_AUDIO_PCM : TIRTC_AUDIO_OPUS;
+            info.flags = input_opus == NULL ? TIRTC_AUDIOSAMPLE_8K16B1C : opus_audio_flags;
             info.ts = frame_ts_ms;
-            info.length = AUDIO_PAYLOAD_BYTES;
+            info.length = payload_len;
             payload_cpu_ns += thread_cpu_now_ns() - segment_cpu_start_ns;
 
             segment_cpu_start_ns = thread_cpu_now_ns();
@@ -1705,7 +1823,11 @@ static int run_audio_iteration(probe_session_t *session,
                 session->audio.send_failed++;
             }
             pthread_mutex_unlock(&session->mutex);
-            next_send_us += (int64_t)config->frame_ms * 1000LL;
+            next_send_us += (int64_t)packet_duration_samples * 1000000LL / 48000LL;
+            input_timeline_samples += packet_duration_samples;
+            if (input_opus != NULL) {
+                input_packet_index++;
+            }
             post_send_cpu_ns += thread_cpu_now_ns() - segment_cpu_start_ns;
         } else {
             sleep_until_monotonic_us(next_send_us);
@@ -1713,6 +1835,16 @@ static int run_audio_iteration(probe_session_t *session,
     }
     loop_cpu_ns = thread_cpu_now_ns() - loop_cpu_start_ns;
     sleep_for_us(1000000LL);
+
+    pthread_mutex_lock(&session->mutex);
+    if (session->echo_writer_open) {
+        if (ogg_opus_writer_close(&session->echo_writer) != 0 || session->echo_writer_error) {
+            log_message(stderr, "failed writing echo audio output: %s", echo_output_path);
+        }
+        session->echo_writer_open = 0;
+    }
+    pthread_mutex_unlock(&session->mutex);
+    free(echo_output_path);
 
     pthread_mutex_lock(&session->mutex);
     session->audio.call_finished_mono_us = monotonic_now_us();
@@ -1896,6 +2028,45 @@ static int run_audio_command(const probe_config_t *config)
     int sync_connect_attempt;
     int rc = TIRTC_E_CONN_OTHER_ERROR;
     FILE *sample_log = NULL;
+    ogg_opus_file_t input_opus = {0};
+    const ogg_opus_file_t *input_opus_ptr = NULL;
+    char opus_error[256];
+    size_t packet_index;
+
+    if (config->audio_input != NULL && config->audio_input[0] != '\0') {
+        if (ogg_opus_read_file(config->audio_input,
+                               &input_opus,
+                               opus_error,
+                               sizeof(opus_error)) != 0) {
+            log_message(stderr, "failed to read Opus input: %s", opus_error);
+            return 1;
+        }
+        for (packet_index = 0; packet_index < input_opus.len; ++packet_index) {
+            if (input_opus.packets[packet_index].len > CALLBACK_EVENT_DATA_BYTES ||
+                input_opus.packets[packet_index].len > UINT32_MAX) {
+                log_message(stderr,
+                            "Opus packet %zu is too large: %zu bytes",
+                            packet_index + 1U,
+                            input_opus.packets[packet_index].len);
+                ogg_opus_file_free(&input_opus);
+                return 1;
+            }
+        }
+        input_opus_ptr = &input_opus;
+        if (input_opus.input_sample_rate != 8000U && input_opus.input_sample_rate != 16000U) {
+            log_message(stderr,
+                        "unsupported Opus input sample rate: %u (expected 8000 or 16000)",
+                        input_opus.input_sample_rate);
+            ogg_opus_file_free(&input_opus);
+            return 1;
+        }
+        log_message(stdout,
+                    "Opus input: %s packets=%zu channels=%u input_sample_rate=%u",
+                    config->audio_input,
+                    input_opus.len,
+                    input_opus.channels,
+                    input_opus.input_sample_rate);
+    }
 
     if (config->audio_sample_log != NULL && config->audio_sample_log[0] != '\0') {
         sample_log = fopen(config->audio_sample_log, "w");
@@ -1904,6 +2075,7 @@ static int run_audio_command(const probe_config_t *config)
                         "failed to open audio sample log %s: %s",
                         config->audio_sample_log,
                         strerror(errno));
+            ogg_opus_file_free(&input_opus);
             return 1;
         }
         fprintf(sample_log,
@@ -1944,6 +2116,7 @@ static int run_audio_command(const probe_config_t *config)
         if (sample_log != NULL) {
             fclose(sample_log);
         }
+        ogg_opus_file_free(&input_opus);
         return 1;
     }
 
@@ -1956,6 +2129,7 @@ static int run_audio_command(const probe_config_t *config)
         if (sample_log != NULL) {
             fclose(sample_log);
         }
+        ogg_opus_file_free(&input_opus);
         return 1;
     }
     print_timesync_summary(sync_samples, sync_count, offset_ns);
@@ -1970,6 +2144,7 @@ static int run_audio_command(const probe_config_t *config)
         if (rc == 0) {
             rc = run_audio_iteration(&session,
                                      config,
+                                     input_opus_ptr,
                                      offset_ns,
                                      success + 1,
                                      config->audio_iterations,
@@ -2024,6 +2199,7 @@ static int run_audio_command(const probe_config_t *config)
     if (sample_log != NULL) {
         fclose(sample_log);
     }
+    ogg_opus_file_free(&input_opus);
     return success == config->audio_iterations ? 0 : 1;
 }
 
@@ -2034,7 +2210,7 @@ static void print_usage(const char *program)
             "  %s connect  --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--iterations <n>] [--connect-timeout-ms <ms>] [--start-retries <n>] [--log-level <1-5|11+>]\n"
             "  %s idle     --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> --connections <n> [--duration-ms <ms>] [--interval-ms <ms>] [--connect-timeout-ms <ms>] [--log-level <1-5|11+>]\n"
             "  %s timesync --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--repeat <n>] [--interval-ms <ms>] [--timeout-ms <ms>] [--log-level <1-5|11+>]\n"
-            "  %s audio    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--audio-iterations <n>] [--duration-ms <ms>] [--frame-ms <ms>] [--repeat <n>] [--start-retries <n>] [--audio-sample-log <csv-path>] [--log-level <1-5|11+>]\n",
+            "  %s audio    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--audio-input <ogg-opus-path> --audio-echo-output <ogg-opus-path>] [--audio-iterations <n>] [--duration-ms <ms>] [--frame-ms <ms>] [--repeat <n>] [--start-retries <n>] [--audio-sample-log <csv-path>] [--log-level <1-5|11+>]\n",
             program,
             program,
             program,
@@ -2108,6 +2284,8 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
             strcmp(arg, "--duration-ms") == 0 ||
             strcmp(arg, "--audio-iterations") == 0 ||
             strcmp(arg, "--audio-sample-log") == 0 ||
+            strcmp(arg, "--audio-input") == 0 ||
+            strcmp(arg, "--audio-echo-output") == 0 ||
             strcmp(arg, "--start-retries") == 0 ||
             strcmp(arg, "--log-level") == 0 ||
             strcmp(arg, "--frame-ms") == 0) {
@@ -2146,11 +2324,17 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
             } else if (strcmp(arg, "--duration-ms") == 0 &&
                        parse_int_value(arg, argv[i + 1], 1, 3600000, &config->duration_ms) != 0) {
                 return -1;
+            } else if (strcmp(arg, "--duration-ms") == 0) {
+                config->duration_explicit = 1;
             } else if (strcmp(arg, "--audio-iterations") == 0 &&
                        parse_int_value(arg, argv[i + 1], 1, 10000, &config->audio_iterations) != 0) {
                 return -1;
             } else if (strcmp(arg, "--audio-sample-log") == 0) {
                 config->audio_sample_log = argv[i + 1];
+            } else if (strcmp(arg, "--audio-input") == 0) {
+                config->audio_input = argv[i + 1];
+            } else if (strcmp(arg, "--audio-echo-output") == 0) {
+                config->audio_echo_output = argv[i + 1];
             } else if (strcmp(arg, "--start-retries") == 0 &&
                        parse_int_value(arg, argv[i + 1], 1, 100, &config->start_retries) != 0) {
                 return -1;
@@ -2186,6 +2370,16 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
         config->peer_id == NULL || config->peer_id[0] == '\0' ||
         config->token == NULL || config->token[0] == '\0') {
         log_message(stderr, "missing required endpoint/device/peer/token argument");
+        return -1;
+    }
+    if (config->command != COMMAND_AUDIO &&
+        (config->audio_input != NULL || config->audio_echo_output != NULL)) {
+        log_message(stderr, "--audio-input/--audio-echo-output are valid only for audio command");
+        return -1;
+    }
+    if (config->audio_echo_output != NULL && config->audio_echo_output[0] != '\0' &&
+        (config->audio_input == NULL || config->audio_input[0] == '\0')) {
+        log_message(stderr, "--audio-echo-output requires --audio-input");
         return -1;
     }
     return 0;

@@ -140,6 +140,24 @@ core 文件的实际位置仍由宿主机 `kernel.core_pattern` 决定。
 `--audio-sample-log` 可选。未指定或传入空字符串时不创建文件；指定路径时写入逐包 CSV，包含轮次、帧序号、
 发送与收包时间、上下行和端到端延迟、相邻回声到达间隔以及卡顿标记。
 
+可以用 Ogg Opus 文件代替内置测试音发送，并保存服务端 echo 回来的音频：
+
+```sh
+./build/macos-arm64/tirtc_accel_device_probe audio \
+  --endpoint https://your-access.example.com \
+  --device-id your_device_id \
+  --device-secret-key your_device_secret_key \
+  --peer-id 'whips://whip-echo-svc?device_id=your_device_id' \
+  --token your_connect_token \
+  --audio-input ~/Downloads/send_audio.opus \
+  --audio-echo-output /tmp/received_echo.opus
+```
+
+`--audio-input` 接受标准 Ogg Opus 文件，按照文件内每个 Opus packet 的原始帧时长发送。不指定
+`--duration-ms` 时发送完整文件；指定后以该时长为上限。`--audio-echo-output` 保存实际收到的 Opus echo，
+并按照回包到达时间补入 20ms Opus 静音帧，因此播放器或转码后的 WAV 都会保留网络停顿。多轮测试时输出文件名
+自动增加 `.iteration-N`。
+
 ### TiRTC 日志等级
 
 两个示例程序均支持 `--log-level <level>`。等级 `1`~`5` 分别对应

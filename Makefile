@@ -38,7 +38,8 @@ SRCS := \
 
 OBJS := $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 PROBE_SRCS := \
-	$(SRC_DIR)/accel_device_probe.c
+	$(SRC_DIR)/accel_device_probe.c \
+	$(SRC_DIR)/ogg_opus.c
 PROBE_OBJS := $(PROBE_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 CPPFLAGS += -I$(SRC_DIR) -I$(TIRTC_INCLUDE_DIR)
 CPPFLAGS += -DTIRTC_SDK_VARIANT=\"$(TIRTC_SDK_VARIANT)\"
