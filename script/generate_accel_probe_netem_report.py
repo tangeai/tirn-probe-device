@@ -11,6 +11,7 @@ LEGACY_CASE_RE = re.compile(r"(connect|audio)_delay_(\d+)_loss_(\d+)\.(?:log|csv
 DIRECTED_CASE_RE = re.compile(
     r"(connect|audio)_delay_(\d+)_uplink_loss_(\d+)_downlink_loss_(\d+)\.(?:log|csv)$"
 )
+STUTTER_THRESHOLD_US = 300000
 
 
 def match(text, pattern, default="—"):
@@ -67,6 +68,25 @@ def integer(row, key, default=0):
         return int(row.get(key, default))
     except (TypeError, ValueError):
         return default
+
+
+def find_echo_audio(report_dir, stem, preferred_iteration=None):
+    candidates = []
+    for directory, suffix in (("audio-echo-wav", "wav"), ("audio-echo", "opus")):
+        for path in (report_dir / directory).glob(f"{stem}.iteration-*.{suffix}"):
+            found = re.search(rf"\.iteration-(\d+)\.{suffix}$", path.name)
+            if found:
+                # Prefer WAV for document playback when both formats exist.
+                format_priority = 1 if suffix == "wav" else 0
+                candidates.append((int(found.group(1)), format_priority, path))
+    if not candidates:
+        return None
+    candidates.sort()
+    if preferred_iteration is not None:
+        preferred = [item for item in candidates if item[0] == preferred_iteration]
+        if preferred:
+            return preferred[-1][2]
+    return candidates[-1][2]
 
 
 def infer_skip_frames(rows, skip_duration_ms):
@@ -149,11 +169,19 @@ def read_audio_metrics(path, target_iterations=None, skip_frames=None, skip_dura
                        if integer(row, "echo_arrival_gap_us") > 0]
     first_echo = []
     stutter_rates = []
-    for ordered in iterations.values():
+    stutter_rates_by_iteration = []
+    stutter_events_by_iteration = {}
+    for iteration, ordered in iterations.items():
         if ordered and integer(ordered[0], "echoed") != 0:
             first_echo.append(integer(ordered[0], "echo_us"))
 
-        stutter_time_us = sum(integer(row, "stutter_time_us") for row in ordered)
+        retained_echoed_rows = [row for row in ordered if integer(row, "echoed") != 0]
+        retained_stutter_rows = retained_echoed_rows[1:]
+        stutter_time_us = sum(
+            integer(row, "echo_arrival_gap_us")
+            for row in retained_stutter_rows
+            if integer(row, "echo_arrival_gap_us") > STUTTER_THRESHOLD_US
+        )
         call_duration_us = max((integer(row, "call_duration_us") for row in ordered), default=0)
         if call_duration_us <= 0 and ordered:
             send_times = [integer(row, "client_send_unix_ns") for row in ordered]
@@ -164,8 +192,41 @@ def read_audio_metrics(path, target_iterations=None, skip_frames=None, skip_dura
                 if frame_durations else 0
             call_duration_us = max(send_times) // 1000 - min(send_times) // 1000
             call_duration_us += frame_duration_us + 1000000
-        stutter_rates.append(stutter_time_us * 100.0 / call_duration_us
-                             if call_duration_us > 0 else 0.0)
+        stutter_rate = stutter_time_us * 100.0 / call_duration_us \
+            if call_duration_us > 0 else 0.0
+        stutter_rates.append(stutter_rate)
+        stutter_rates_by_iteration.append((stutter_rate, iteration))
+
+        full_ordered = sorted(
+            all_iterations[iteration], key=lambda row: integer(row, "send_index")
+        )
+        echoed_rows = [row for row in full_ordered if integer(row, "echoed") != 0]
+        first_echo_ns = integer(echoed_rows[0], "client_echo_recv_unix_ns") \
+            if echoed_rows else 0
+        analysis_origin_ns = integer(retained_echoed_rows[0], "client_echo_recv_unix_ns") \
+            if retained_echoed_rows else first_echo_ns
+        analysis_origin_us = max(0, (analysis_origin_ns - first_echo_ns) // 1000)
+        retained_ids = {integer(row, "send_index") for row in retained_stutter_rows}
+        events = []
+        for row in echoed_rows:
+            if integer(row, "send_index") not in retained_ids:
+                continue
+            gap_us = integer(row, "echo_arrival_gap_us")
+            echo_recv_ns = integer(row, "client_echo_recv_unix_ns")
+            if gap_us <= STUTTER_THRESHOLD_US or echo_recv_ns <= 0 or first_echo_ns <= 0:
+                continue
+            start_us = max(0, (echo_recv_ns - first_echo_ns) // 1000 - gap_us)
+            analysis_start_us = max(0, start_us - analysis_origin_us)
+            events.append((analysis_start_us, start_us, gap_us))
+        stutter_events_by_iteration[iteration] = events
+
+    if stutter_rates_by_iteration:
+        representative_rate, representative_iteration = max(stutter_rates_by_iteration)
+        result["representative_iteration"] = str(representative_iteration)
+        result["representative_stutter_rate"] = f"{representative_rate:.2f}"
+        representative_events = stutter_events_by_iteration.get(representative_iteration, [])
+        result["representative_stutter_count"] = str(len(representative_events))
+        result["representative_stutter_events"] = representative_events
 
     add_distribution(result, "uplink_latency", uplink, scale=1000.0, nearest=True)
     add_distribution(result, "downlink_latency", downlink, scale=1000.0, nearest=True)
@@ -226,11 +287,22 @@ def value(case, key, suffix=""):
     return f"{raw}{suffix}" if raw is not None else "—"
 
 
+def distribution_cell(case, items, suffix=""):
+    return "<br>".join(
+        f"{label} {value(case, key, suffix)}" for label, key in items
+    )
+
+
 def ping_cell(case):
     loss = value(case, "ping_loss", "%")
-    distribution = "/".join(value(case, key, "ms") for key in (
-        "ping_avg", "ping_p50", "ping_p90", "ping_p95", "ping_p99"))
-    return f"loss {loss}; {distribution}"
+    distribution = distribution_cell(case, (
+        ("平均", "ping_avg"),
+        ("P50", "ping_p50"),
+        ("P90", "ping_p90"),
+        ("P95", "ping_p95"),
+        ("P99", "ping_p99"),
+    ), "ms")
+    return f"Loss {loss}<br>{distribution}"
 
 
 def status_cell(case):
@@ -342,9 +414,18 @@ def main():
         "旧 CSV 未记录实际 call duration，卡顿占比按发送时间轴、末帧时长和 1 秒收包窗口推导；"
         "缺少采样 CSV 时音频指标显示 `—`。",
         "",
+        "## 卡顿计算公式",
+        "",
+        "- 相邻回声帧到达间隔：`gap_i = echo_recv_time_i - echo_recv_time_(i-1)`。",
+        "- 卡顿判定：当 `gap_i > 300ms` 时，该帧记为一次卡顿。",
+        "- 单次卡顿时长：`stutter_i = gap_i`，不扣减 `expected_frame_interval`。",
+        "- 单轮卡顿占比：`stutter_rate = Σ stutter_i / call_duration × 100%`。",
+        "- 表格中的卡顿平均/P50/P90/P95/P99，是先计算每轮卡顿占比，再对各成功轮次做分布统计。",
+        "- 报告计算时每轮跳过约 10 秒起始帧；旧 CSV 没有 `call_duration_us` 时，分母按保留帧的发送时间跨度、末帧时长及 1 秒回声等待窗口推导。",
+        "",
         "## Connect 结果",
         "",
-        "| Delay | 上行 Loss | 下行 Loss | Ping Loss；RTT 平均/P50/P90/P95/P99 | Connect 成功 | 平均 | P50 | P90 | P95 | P99 | 状态 | 退出码 | 日志 | 测试脚本 |",
+        "| Delay | 上行 Loss | 下行 Loss | Ping | Connect 成功 | 平均 | P50 | P90 | P95 | P99 | 状态 | 退出码 | 日志 | 测试脚本 |",
         "|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---|---:|---|---|",
     ]
     for delay, uplink_loss, downlink_loss in connect_combinations:
@@ -364,10 +445,11 @@ def main():
         "",
         "## Audio 结果",
         "",
-        "| Delay | 上行 Loss | 下行 Loss | Ping Loss；RTT 平均/P50/P90/P95/P99 | 成功轮次 | 发送/失败 | 服务端收包率 | 回声率 | 上行延迟 平均/P50/P90/P95/P99 | 下行延迟 平均/P50/P90/P95/P99 | 帧间隔分布 平均/P50/P90/P95/P99 | 卡顿平均/P50/P90/P95/P99 | 首包回声 P50/P90/P95/P99 | 状态 | 退出码 | 样本 CSV | 日志 | 测试脚本 |",
-        "|---:|---:|---:|---|---:|---:|---:|---:|---|---|---|---|---|---|---:|---|---|---|",
+        "| Delay | 上行 Loss | 下行 Loss | Ping | 成功轮次 | 发送/失败 | 服务端收包率 | 回声率 | 上行延迟 | 下行延迟 | 帧间隔分布 | 卡顿 | 首包回声 | 回声音频 | 状态 | 退出码 | 样本 CSV | 日志 | 测试脚本 |",
+        "|---:|---:|---:|---|---:|---:|---:|---:|---|---|---|---|---|---|---|---:|---|---|---|",
     ]
-    for delay, uplink_loss, downlink_loss in audio_combinations:
+    echo_audio_entries = []
+    for audio_index, (delay, uplink_loss, downlink_loss) in enumerate(audio_combinations, 1):
         case = cases.get((delay, uplink_loss, downlink_loss, "audio"), {})
         log_path = case.get("path")
         sample_path = case.get("sample_path")
@@ -375,29 +457,84 @@ def main():
         sample_rel = f"audio-samples/{sample_path.name}" if sample_path else "—"
         stem = log_path.stem if log_path else sample_path.stem if sample_path else ""
         script_rel = f"commands/{stem}.sh" if stem else "—"
+        representative_iteration = integer(case, "representative_iteration", target_audio_iterations)
+        echo_audio_path = find_echo_audio(report_dir, stem, representative_iteration) if stem else None
+        audio_label = f"A{audio_index:02d}"
+        if echo_audio_path:
+            echo_audio_entries.append((
+                audio_label, delay, uplink_loss, downlink_loss, echo_audio_path,
+                representative_iteration, case.get("representative_stutter_rate", "—"),
+                case.get("representative_stutter_count", "0"),
+                case.get("representative_stutter_events", []),
+            ))
+            echo_audio_cell = f"[播放 {audio_label}](#回声音频-{audio_label.lower()})"
+        else:
+            echo_audio_cell = "—"
         rounds = f"{value(case, 'audio_ok')}/{value(case, 'audio_total')}"
         sent = f"{value(case, 'sent')}/{value(case, 'send_failed')}"
-        stutter = "/".join(value(case, key, "%") for key in (
-            "stutter_avg", "stutter_p50", "stutter_p90", "stutter_p95", "stutter_p99"))
-        uplink = "/".join(value(case, key, "ms") for key in (
+        distribution_labels = ("平均", "P50", "P90", "P95", "P99")
+        stutter = distribution_cell(case, tuple(zip(distribution_labels, (
+            "stutter_avg", "stutter_p50", "stutter_p90", "stutter_p95", "stutter_p99",
+        ))), "%")
+        uplink = distribution_cell(case, tuple(zip(distribution_labels, (
             "uplink_latency_avg", "uplink_latency_p50", "uplink_latency_p90",
-            "uplink_latency_p95", "uplink_latency_p99"))
-        downlink = "/".join(value(case, key, "ms") for key in (
+            "uplink_latency_p95", "uplink_latency_p99",
+        ))), "ms")
+        downlink = distribution_cell(case, tuple(zip(distribution_labels, (
             "downlink_latency_avg", "downlink_latency_p50", "downlink_latency_p90",
-            "downlink_latency_p95", "downlink_latency_p99"))
-        frame_interval = "/".join(value(case, key, "ms") for key in (
+            "downlink_latency_p95", "downlink_latency_p99",
+        ))), "ms")
+        frame_interval = distribution_cell(case, tuple(zip(distribution_labels, (
             "frame_interval_avg", "frame_interval_p50", "frame_interval_p90",
-            "frame_interval_p95", "frame_interval_p99"))
-        echo = "/".join(value(case, key, "ms") for key in (
-            "echo_latency_p50", "echo_latency_p90", "echo_latency_p95", "echo_latency_p99"))
+            "frame_interval_p95", "frame_interval_p99",
+        ))), "ms")
+        echo = distribution_cell(case, (
+            ("平均", "echo_latency_avg"),
+            ("P50", "echo_latency_p50"),
+            ("P90", "echo_latency_p90"),
+            ("P95", "echo_latency_p95"),
+            ("P99", "echo_latency_p99"),
+        ), "ms")
         lines.append(
             f"| {delay}ms | {uplink_loss}% | {downlink_loss}% | {ping_cell(case)} | {rounds} | {sent} | "
             f"{value(case, 'server_rate', '%')} | {value(case, 'echo_rate', '%')} | {uplink} | {downlink} | "
             f"{frame_interval} | {stutter} | "
-            f"{echo} | {status_cell(case)} | {value(case, 'exit_code')} | "
+            f"{echo} | {echo_audio_cell} | {status_cell(case)} | {value(case, 'exit_code')} | "
             f"[{Path(sample_rel).name}]({sample_rel}) | [{Path(rel).name}]({rel}) | "
             f"[{Path(script_rel).name}]({script_rel}) |"
         )
+
+    if echo_audio_entries:
+        lines += [
+            "", "## 回声音频", "",
+            "每个用例选择单轮卡顿占比最高的一轮作为代表；若多轮并列，则选择轮次号最大的一轮。", "",
+            "卡顿明细与表格指标均跳过每轮起始约 10 秒。分析窗口位置以跳过完成后的首个回声为 `0s`；完整音频位置以 WAV 起点为 `0s`，可用于播放器定位。", "",
+        ]
+        for (audio_label, delay, uplink_loss, downlink_loss, echo_audio_path,
+             representative_iteration, representative_stutter_rate,
+             representative_stutter_count, representative_stutter_events) in echo_audio_entries:
+            lines += [
+                f"### 回声音频 {audio_label}",
+                "",
+                f"- 条件：Delay `{delay}ms`，上行 Loss `{uplink_loss}%`，下行 Loss `{downlink_loss}%`",
+                f"- 代表轮次：第 `{representative_iteration}` 轮；该轮卡顿占比 `{representative_stutter_rate}%`",
+                f"- 卡顿次数：`{representative_stutter_count}` 次",
+                "- 卡顿位置与时长：",
+            ]
+            if representative_stutter_events:
+                lines.extend(
+                    f"    - {index}. 分析窗口位置 `{analysis_start_us / 1000000.0:.3f}s`，"
+                    f"完整音频位置 `{audio_start_us / 1000000.0:.3f}s`，"
+                    f"时长 `{gap_us / 1000.0:.2f}ms`"
+                    for index, (analysis_start_us, audio_start_us, gap_us)
+                    in enumerate(representative_stutter_events, 1)
+                )
+            else:
+                lines.append("    - 无")
+            lines += [
+                f"- 文件：`{echo_audio_path.name}`",
+                "",
+            ]
 
     failed = [
         (delay, uplink_loss, downlink_loss, command, case.get("exit_code"))
@@ -411,7 +548,7 @@ def main():
         lines.append("- 所有矩阵命令均返回 0。")
     lines += [
         "- Ping 数据来自 probe 容器，经同一 netem gateway 到测试目标，可用于核对实际 RTT 和丢包。",
-        "- macOS arm64 Docker Desktop 运行 linux/amd64 镜像，绝对 CPU/时延可能受虚拟化和指令模拟影响。",
+        "- 本次测试运行在 Linux x86_64 服务器，报告中的时延和丢包数据适用于该测试环境与网络条件。",
         "- `loss` 在上下行独立随机应用；一次请求-响应事务的成功概率不能直接等同于单向配置值。",
         "- 原始日志和退出码均保存在 `logs/`，报告未包含 token 或 device secret。",
         "- Connect 退出码 1 表示成功次数未达到总尝试次数；Audio 退出码 1 表示成功轮次未达到总轮次。`no samples` 表示没有成功样本，不是解析遗漏。",

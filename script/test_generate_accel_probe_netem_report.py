@@ -11,6 +11,33 @@ SPEC.loader.exec_module(REPORT)
 
 
 class ParseLogTest(unittest.TestCase):
+    def test_distribution_cells_use_labeled_line_breaks(self):
+        case = {
+            "ping_loss": "10",
+            "ping_avg": "12.00",
+            "ping_p50": "11.00",
+            "ping_p90": "13.00",
+            "ping_p95": "14.00",
+            "ping_p99": "15.00",
+        }
+        self.assertEqual(
+            REPORT.ping_cell(case),
+            "Loss 10%<br>平均 12.00ms<br>P50 11.00ms<br>P90 13.00ms<br>"
+            "P95 14.00ms<br>P99 15.00ms",
+        )
+
+        self.assertEqual(
+            REPORT.distribution_cell(case, (
+                ("平均", "ping_avg"),
+                ("P50", "ping_p50"),
+                ("P90", "ping_p90"),
+                ("P95", "ping_p95"),
+                ("P99", "ping_p99"),
+            ), "ms"),
+            "平均 12.00ms<br>P50 11.00ms<br>P90 13.00ms<br>"
+            "P95 14.00ms<br>P99 15.00ms",
+        )
+
     def test_audio_metrics_are_recalculated_from_csv(self):
         csv_text = """\
 iteration,send_index,frame_ts_ms,send_ret,send_late_us,observed,echoed,client_send_unix_ns,server_recv_unix_ns,client_echo_recv_unix_ns,uplink_us,downlink_us,echo_us,echo_arrival_gap_us,stutter,stutter_time_us
@@ -23,6 +50,7 @@ iteration,send_index,frame_ts_ms,send_ret,send_late_us,observed,echoed,client_se
             csv_path = Path(temp_dir) / "audio_delay_000_loss_00.csv"
             csv_path.write_text(csv_text)
             result = REPORT.read_audio_metrics(csv_path, 2, skip_frames=0)
+            skipped_result = REPORT.read_audio_metrics(csv_path, 2, skip_frames=1)
 
         self.assertEqual(result["audio_ok"], "2")
         self.assertEqual(result["audio_total"], "2")
@@ -36,7 +64,12 @@ iteration,send_index,frame_ts_ms,send_ret,send_late_us,observed,echoed,client_se
         self.assertEqual(result["downlink_latency_avg"], "126.67")
         self.assertEqual(result["echo_latency_avg"], "32.50")
         self.assertEqual(result["frame_interval_avg"], "400.00")
-        self.assertGreater(float(result["stutter_avg"]), 0.0)
+        self.assertEqual(result["stutter_avg"], "17.86")
+        self.assertEqual(result["representative_iteration"], "1")
+        self.assertEqual(result["representative_stutter_count"], "1")
+        self.assertEqual(result["representative_stutter_events"], [(0, 0, 400000)])
+        self.assertEqual(skipped_result["stutter_avg"], "0.00")
+        self.assertEqual(skipped_result["representative_stutter_count"], "0")
         self.assertEqual(REPORT.infer_skip_frames([
             {"iteration": "1", "frame_ts_ms": str(index * 40)} for index in range(251)
         ], 10000), 250)
