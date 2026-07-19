@@ -26,9 +26,11 @@ TARGET := $(BUILD_DIR)/$(PLATFORM)/device_uplink_demo
 PROBE_TARGET := $(BUILD_DIR)/$(PLATFORM)/tirtc_accel_device_probe
 OBJ_DIR := $(BUILD_DIR)/$(PLATFORM)/obj
 SRC_DIR := src
-TIRTC_SDK_DIR := 3rd/$(PLATFORM)
+TIRTC_SDK_DIR ?= 3rd/$(PLATFORM)
 TIRTC_INCLUDE_DIR := $(TIRTC_SDK_DIR)/include/tirtc
 TIRTC_LIB_DIR := $(TIRTC_SDK_DIR)/lib
+TIRTC_SDK_VARIANT ?= vendored-$(PLATFORM)
+TIRTC_SDK_SOURCE_URL ?= vendored
 
 SRCS := \
 	$(SRC_DIR)/main.c \
@@ -39,6 +41,8 @@ PROBE_SRCS := \
 	$(SRC_DIR)/accel_device_probe.c
 PROBE_OBJS := $(PROBE_SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 CPPFLAGS += -I$(SRC_DIR) -I$(TIRTC_INCLUDE_DIR)
+CPPFLAGS += -DTIRTC_SDK_VARIANT=\"$(TIRTC_SDK_VARIANT)\"
+CPPFLAGS += -DTIRTC_SDK_SOURCE_URL=\"$(TIRTC_SDK_SOURCE_URL)\"
 CFLAGS += -std=c11 -Wall -Wextra -Werror
 
 TIRTC_LIBS := $(TIRTC_LIB_DIR)/libTiRTC.a

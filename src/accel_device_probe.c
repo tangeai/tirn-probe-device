@@ -15,6 +15,14 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef TIRTC_SDK_VARIANT
+#define TIRTC_SDK_VARIANT "unknown"
+#endif
+
+#ifndef TIRTC_SDK_SOURCE_URL
+#define TIRTC_SDK_SOURCE_URL "unknown"
+#endif
+
 #include "tiRTC.h"
 
 enum {
@@ -2354,6 +2362,8 @@ int main(int argc, char **argv)
     int parse_result;
     int rc;
 
+    printf("[accel-probe] TiRTC SDK variant: %s\n", TIRTC_SDK_VARIANT);
+    printf("[accel-probe] TiRTC SDK source: %s\n", TIRTC_SDK_SOURCE_URL);
     parse_result = parse_arguments(argc, argv, &config);
     if (parse_result > 0) {
         print_usage(argv[0]);

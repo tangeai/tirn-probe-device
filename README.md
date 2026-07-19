@@ -174,6 +174,37 @@ error/warn/ok/info/verbose；`11`~`100` 会额外开启 WebRTC 底层日志，�
 
 ## 更新或替换 SDK
 
+### Probe runner 镜像的 TiRTC SDK
+
+`script/build_accel_probe_runner_image.sh` 构建镜像时会从制品库下载并分别编译两个 Linux SDK 版本：
+
+- `tgmp-linux-standard`
+- `tgmp-linux-desktop-standard`
+
+镜像运行时默认规则：`idle` 命令使用 desktop，其余命令使用 standard。也可以通过环境变量或启动参数显式选择：
+
+```sh
+docker run --rm IMAGE \
+  tirtc_accel_device_probe --tirtc-sdk desktop idle ...
+
+docker run --rm \
+  -e TIRTC_SDK_VARIANT=standard \
+  IMAGE \
+  tirtc_accel_device_probe connect ...
+```
+
+允许值为 `standard`、`desktop`，也接受完整名称。为保证 idle 多连接测试条件一致，`idle` 显式选择 standard
+会直接报错退出。probe 启动后会打印实际 SDK variant、下载地址和 `TiRtcGetVersion()`。
+
+可以在构建时覆盖 SDK 下载链接：
+
+```sh
+TIRTC_STANDARD_SDK_URL=https://.../standard.tgz \
+TIRTC_DESKTOP_SDK_URL=https://.../desktop-standard.tgz \
+PROBE_IMAGE=tirtc-accel-probe-runner:test \
+./script/build_accel_probe_runner_image.sh
+```
+
 SDK 包浏览地址：
 
 - macOS arm64: https://repo-sdk.tange-ai.com/service/rest/repository/browse/tirtc-sdks/releases/macos-arm64/

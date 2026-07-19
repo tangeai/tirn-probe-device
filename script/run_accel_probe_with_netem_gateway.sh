@@ -2,6 +2,7 @@
 set -eu
 
 image=${PROBE_IMAGE:-docker-hub.tange365.com/runtime/tirtc-accel-probe-runner:test}
+tirtc_sdk_variant=${TIRTC_SDK_VARIANT:-standard}
 network_name=${NETEM_NETWORK:-tirtc-netem-probe}
 subnet=${NETEM_SUBNET:-172.31.0.0/24}
 uplink_network_name=${NETEM_UPLINK_NETWORK:-tirtc-netem-uplink}
@@ -55,6 +56,7 @@ Usage:
 
 Optional environment variables:
   PROBE_IMAGE=docker-hub.tange365.com/runtime/tirtc-accel-probe-runner:test
+  TIRTC_SDK_VARIANT=standard|desktop
   NETEM_NETWORK=tirtc-netem-probe
   NETEM_SUBNET=172.31.0.0/24
   NETEM_UPLINK_NETWORK=tirtc-netem-uplink
@@ -233,6 +235,7 @@ docker run --rm \
   -e DEVICE_SECRET_KEY="$device_secret_key" \
   -e PEER_ID="$peer_id" \
   -e TOKEN="$token" \
+  -e TIRTC_SDK_VARIANT="$tirtc_sdk_variant" \
   -e COMMAND="$command" \
   -e CONNECT_ITERATIONS="$connect_iterations" \
   -e CONNECT_TIMEOUT_MS="$connect_timeout_ms" \
