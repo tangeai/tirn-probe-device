@@ -97,7 +97,7 @@ for loss in $(csv_to_words "$losses"); do
               --peer-id "$PEER_ID" \
               --token "$TOKEN" \
               --audio-iterations "$AUDIO_ITERATIONS" \
-              --duration-ms "$DURATION_MS" \
+              --duration-sec "$(( (DURATION_MS + 999) / 1000 ))" \
               --frame-ms "$FRAME_MS"
             ;;
           connect)

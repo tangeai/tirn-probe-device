@@ -363,7 +363,7 @@ docker run --rm \
           --interval-ms "$TIMESYNC_INTERVAL_MS" \
           --timeout-ms "$TIMESYNC_TIMEOUT_MS" \
           --audio-iterations "$AUDIO_ITERATIONS" \
-          --duration-ms "$DURATION_MS" \
+          --duration-sec "$(( (DURATION_MS + 999) / 1000 ))" \
           --frame-ms "$FRAME_MS" \
           --audio-sample-log "$AUDIO_SAMPLE_LOG" \
           "$@"

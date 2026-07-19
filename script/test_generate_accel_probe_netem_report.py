@@ -11,6 +11,14 @@ SPEC.loader.exec_module(REPORT)
 
 
 class ParseLogTest(unittest.TestCase):
+    def test_stutter_events_are_nested_ordered_items_without_empty_bullets(self):
+        lines = REPORT.stutter_event_lines([(0, 12080000, 368070)])
+        self.assertEqual(
+            lines,
+            ["    1. 完整音频位置 `12.080s`，时长 `368.07ms`"],
+        )
+        self.assertNotIn("    - 1.", lines[0])
+
     def test_distribution_cells_use_labeled_line_breaks(self):
         case = {
             "ping_loss": "10",
@@ -66,6 +74,7 @@ iteration,send_index,frame_ts_ms,send_ret,send_late_us,observed,echoed,client_se
         self.assertEqual(result["frame_interval_avg"], "400.00")
         self.assertEqual(result["stutter_avg"], "16.07")
         self.assertEqual(result["representative_iteration"], "1")
+        self.assertEqual(result["representative_first_echo_ms"], "30.00")
         self.assertEqual(result["representative_stutter_count"], "1")
         self.assertEqual(result["representative_stutter_events"], [(40000, 40000, 360000)])
         self.assertEqual(skipped_result["stutter_avg"], "0.00")

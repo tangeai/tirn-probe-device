@@ -122,6 +122,30 @@ def report_audio_entries(report_dir, markdown):
     return entries
 
 
+def ensure_previewable_audio(report_dir, markdown):
+    """Convert selected Opus representatives to WAV and update the report."""
+    converted = 0
+    for _label, audio_path in report_audio_entries(report_dir, markdown):
+        if audio_path.suffix.lower() != ".opus":
+            continue
+        if shutil.which("ffmpeg") is None:
+            raise RuntimeError(
+                f"ffmpeg is required to convert representative Opus audio: {audio_path}"
+            )
+        wav_dir = report_dir / "audio-echo-wav"
+        wav_dir.mkdir(parents=True, exist_ok=True)
+        wav_path = wav_dir / f"{audio_path.stem}.wav"
+        run([
+            "ffmpeg", "-y", "-loglevel", "error", "-i", audio_path,
+            "-c:a", "pcm_s16le", wav_path,
+        ])
+        if not wav_path.is_file() or wav_path.stat().st_size == 0:
+            raise RuntimeError(f"converted WAV was not created: {wav_path}")
+        markdown = markdown.replace(f"`{audio_path.name}`", f"`{wav_path.name}`")
+        converted += 1
+    return markdown, converted
+
+
 def block_text(block):
     for key in ("heading1", "heading2", "heading3", "heading4"):
         elements = block.get(key, {}).get("elements", [])
@@ -242,6 +266,10 @@ def main():
         "--audio-skip-duration-ms", str(args.audio_skip_duration_ms),
     ])
     markdown = report_path.read_text(encoding="utf-8")
+    converted = 0
+    if not args.skip_audio:
+        markdown, converted = ensure_previewable_audio(report_dir, markdown)
+        report_path.write_text(markdown, encoding="utf-8")
     audio_entries = [] if args.skip_audio else report_audio_entries(report_dir, markdown)
     title = args.title or report_dir.name
 
@@ -300,6 +328,23 @@ def main():
             f"verification failed: expected {uploaded} audio blocks, "
             f"found {fetched.count('<file token=')}"
         )
+    for label, audio_path in audio_entries:
+        if audio_path.suffix.lower() != ".wav":
+            raise RuntimeError(f"verification failed: {label} is not WAV: {audio_path.name}")
+        section_match = re.search(
+            rf"^### 回声音频 {re.escape(label)}$(.*?)(?=^### 回声音频 |^## |\Z)",
+            fetched,
+            re.MULTILINE | re.DOTALL,
+        )
+        if not section_match or f'name="{audio_path.name}"' not in section_match.group(1):
+            raise RuntimeError(
+                f"verification failed: {label} does not contain {audio_path.name}"
+            )
+    if fetched.count("首包回声延迟：") != len(audio_entries):
+        raise RuntimeError(
+            f"verification failed: expected {len(audio_entries)} first-echo descriptions, "
+            f"found {fetched.count('首包回声延迟：')}"
+        )
 
     print(json.dumps({
         "success": True,
@@ -307,6 +352,7 @@ def main():
         "document_token": document_token,
         "wiki_node_token": node_token,
         "audio_uploaded": uploaded,
+        "audio_converted_to_wav": converted,
         "url": created_url,
     }, ensure_ascii=False, indent=2))
 

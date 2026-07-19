@@ -75,7 +75,7 @@ build/linux-x86_64/tirtc_accel_device_probe
 ### 并发空闲连接压测
 
 `idle` 模式会逐个建立指定数量的 TiRTC 连接并同时保持，不主动发送命令、音频或视频业务数据，适合测试
-服务端并发连接容量。`--interval-ms` 控制相邻连接的启动间隔，达到目标连接数后按 `--duration-ms` 保持；
+服务端并发连接容量。`--interval-ms` 控制相邻连接的启动间隔，达到目标连接数后按 `--duration-sec` 保持；
 可使用 `Ctrl-C` 提前结束并统一断开连接。
 
 ```sh
@@ -87,7 +87,7 @@ build/linux-x86_64/tirtc_accel_device_probe
   --token your_connect_token \
   --connections 1000 \
   --interval-ms 10 \
-  --duration-ms 600000
+  --duration-sec 600
 ```
 
 输出包含成功建立数、峰值并发数、保持结束时的存活连接数、异常断连数及建连耗时分位值。目标服务所用
@@ -155,7 +155,7 @@ RTC_THREAD_STAT_SAMPLE_EVERY=100 ./script/run_accel_probe_idle_1000.sh
   --device-secret-key your_device_secret_key \
   --peer-id 'whips://whip-echo-svc?device_id=your_device_id' \
   --token your_connect_token \
-  --duration-ms 10000 \
+  --duration-sec 10 \
   --frame-ms 40 \
   --audio-sample-log /tmp/audio-samples.csv
 ```
@@ -181,7 +181,7 @@ RTC_THREAD_STAT_SAMPLE_EVERY=100 ./script/run_accel_probe_idle_1000.sh
 ```
 
 `--audio-input` 接受标准 Ogg Opus 文件，按照文件内每个 Opus packet 的原始帧时长发送。不指定
-`--duration-ms` 时发送完整文件；指定后以该时长为上限。`--audio-echo-output` 保存实际收到的 Opus echo，
+`--duration-sec` 时发送完整文件；指定后以该时长为上限。`--audio-echo-output` 保存实际收到的 Opus echo，
 并按照回包到达时间补入 20ms Opus 静音帧，因此播放器或转码后的 WAV 都会保留网络停顿。多轮测试时输出文件名
 自动增加 `.iteration-N`。
 

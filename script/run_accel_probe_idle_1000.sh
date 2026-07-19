@@ -15,7 +15,7 @@ image=${PROBE_IMAGE:-docker-hub.tange365.com/runtime/tirtc-accel-probe-runner:te
 tirtc_sdk_variant=desktop
 connections=${CONNECTIONS:-1000}
 connections_per_process=${CONNECTIONS_PER_PROCESS:-300}
-duration_ms=${DURATION_MS:-600000}
+duration_sec=${DURATION_SEC:-600}
 interval_ms=${INTERVAL_MS:-10}
 connect_timeout_ms=${CONNECT_TIMEOUT_MS:-60000}
 log_level=${LOG_LEVEL:-3}
@@ -73,8 +73,8 @@ cleanup() {
 
 trap cleanup INT TERM EXIT
 
-printf '[idle-probe] image=%s total_connections=%s connections_per_process=%s workers=%s ramp_interval_ms=%s hold_duration_ms=%s\n' \
-  "$image" "$connections" "$connections_per_process" "$worker_count" "$interval_ms" "$duration_ms"
+printf '[idle-probe] image=%s total_connections=%s connections_per_process=%s workers=%s ramp_interval_ms=%s hold_duration_sec=%s\n' \
+  "$image" "$connections" "$connections_per_process" "$worker_count" "$interval_ms" "$duration_sec"
 printf '[idle-probe] run_id=%s log_dir=%s\n' "$run_id" "$log_dir"
 printf '[idle-probe] RTC_THREAD_STAT sample_every=%s (0=disabled, 1=all, N=keep one of every N)\n' \
   "$rtc_thread_stat_sample_every"
@@ -114,9 +114,9 @@ for ((worker = 1; worker <= worker_count; worker++)); do
         --connections "$1" \
         --interval-ms "$2" \
         --connect-timeout-ms "$3" \
-        --duration-ms "$4" \
+        --duration-sec "$4" \
         --log-level "$5"' \
-      idle-probe "$worker_connections" "$interval_ms" "$connect_timeout_ms" "$duration_ms" "$log_level" \
+      idle-probe "$worker_connections" "$interval_ms" "$connect_timeout_ms" "$duration_sec" "$log_level" \
       2>&1 | awk -v worker="$worker" -v sample_every="$rtc_thread_stat_sample_every" '
         /\[RTC_THREAD_STAT\]/ {
           stat_count++

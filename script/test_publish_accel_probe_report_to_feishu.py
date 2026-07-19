@@ -1,5 +1,6 @@
 import importlib.util
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,6 +12,34 @@ SPEC.loader.exec_module(PUBLISH)
 
 
 class PublishReportTest(unittest.TestCase):
+    def test_ensure_previewable_audio_converts_selected_opus(self):
+        original_run = PUBLISH.run
+        original_which = PUBLISH.shutil.which
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                report_dir = Path(temp_dir)
+                source_dir = report_dir / "audio-echo"
+                source_dir.mkdir()
+                source = source_dir / "case.iteration-3.opus"
+                source.write_bytes(b"opus")
+                markdown = "### 回声音频 A01\n\n- 文件：`case.iteration-3.opus`\n"
+
+                def fake_run(command, cwd=None):
+                    Path(command[-1]).write_bytes(b"wav")
+                    return ""
+
+                PUBLISH.run = fake_run
+                PUBLISH.shutil.which = lambda name: "/usr/bin/ffmpeg"
+                updated, converted = PUBLISH.ensure_previewable_audio(report_dir, markdown)
+                entries = PUBLISH.report_audio_entries(report_dir, updated)
+        finally:
+            PUBLISH.run = original_run
+            PUBLISH.shutil.which = original_which
+
+        self.assertEqual(converted, 1)
+        self.assertIn("case.iteration-3.wav", updated)
+        self.assertEqual(entries[0][1].suffix, ".wav")
+
     def test_multiline_distribution_verification_pattern(self):
         fetched = "平均 14.59ms\nP50 14.63ms\nP90 16.80ms\nP95 17.06ms\nP99 17.34ms"
         self.assertRegex(

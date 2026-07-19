@@ -168,12 +168,14 @@ def read_audio_metrics(path, target_iterations=None, skip_frames=None, skip_dura
     frame_intervals = [integer(row, "echo_arrival_gap_us") for row in rows
                        if integer(row, "echo_arrival_gap_us") > 0]
     first_echo = []
+    first_echo_by_iteration = {}
     stutter_rates = []
     stutter_rates_by_iteration = []
     stutter_events_by_iteration = {}
     for iteration, ordered in iterations.items():
         if ordered and integer(ordered[0], "echoed") != 0:
-            first_echo.append(integer(ordered[0], "echo_us"))
+            first_echo_us = integer(ordered[0], "echo_us")
+            first_echo.append(first_echo_us)
 
         retained_echoed_rows = [row for row in ordered if integer(row, "echoed") != 0]
         retained_stutter_rows = retained_echoed_rows[1:]
@@ -190,6 +192,8 @@ def read_audio_metrics(path, target_iterations=None, skip_frames=None, skip_dura
              if integer(row, "echoed") != 0 and integer(row, "client_echo_recv_unix_ns") > 0),
             key=lambda row: integer(row, "client_echo_recv_unix_ns"),
         )
+        if echoed_by_arrival:
+            first_echo_by_iteration[iteration] = integer(echoed_by_arrival[0], "echo_us")
         playback_stutters = {}
         if echoed_by_arrival:
             first_echo_ns = integer(echoed_by_arrival[0], "client_echo_recv_unix_ns")
@@ -238,6 +242,11 @@ def read_audio_metrics(path, target_iterations=None, skip_frames=None, skip_dura
         representative_events = stutter_events_by_iteration.get(representative_iteration, [])
         result["representative_stutter_count"] = str(len(representative_events))
         result["representative_stutter_events"] = representative_events
+        representative_first_echo_us = first_echo_by_iteration.get(representative_iteration)
+        result["representative_first_echo_ms"] = (
+            f"{representative_first_echo_us / 1000.0:.2f}"
+            if representative_first_echo_us is not None else "—"
+        )
 
     add_distribution(result, "uplink_latency", uplink, scale=1000.0, nearest=True)
     add_distribution(result, "downlink_latency", downlink, scale=1000.0, nearest=True)
@@ -302,6 +311,15 @@ def distribution_cell(case, items, suffix=""):
     return "<br>".join(
         f"{label} {value(case, key, suffix)}" for label, key in items
     )
+
+
+def stutter_event_lines(events):
+    return [
+        f"    {index}. 完整音频位置 `{audio_start_us / 1000000.0:.3f}s`，"
+        f"时长 `{gap_us / 1000.0:.2f}ms`"
+        for index, (_analysis_start_us, audio_start_us, gap_us)
+        in enumerate(events, 1)
+    ]
 
 
 def ping_cell(case):
@@ -477,6 +495,7 @@ def main():
                 representative_iteration, case.get("representative_stutter_rate", "—"),
                 case.get("representative_stutter_count", "0"),
                 case.get("representative_stutter_events", []),
+                case.get("representative_first_echo_ms", "—"),
             ))
             echo_audio_cell = f"[播放 {audio_label}](#回声音频-{audio_label.lower()})"
         else:
@@ -523,22 +542,19 @@ def main():
         ]
         for (audio_label, delay, uplink_loss, downlink_loss, echo_audio_path,
              representative_iteration, representative_stutter_rate,
-             representative_stutter_count, representative_stutter_events) in echo_audio_entries:
+             representative_stutter_count, representative_stutter_events,
+             representative_first_echo_ms) in echo_audio_entries:
             lines += [
                 f"### 回声音频 {audio_label}",
                 "",
                 f"- 条件：Delay `{delay}ms`，上行 Loss `{uplink_loss}%`，下行 Loss `{downlink_loss}%`",
                 f"- 代表轮次：第 `{representative_iteration}` 轮；该轮卡顿占比 `{representative_stutter_rate}%`",
+                f"- 首包回声延迟：`{representative_first_echo_ms}ms`（该轮首个成功回声包，从设备发送该包到收到回声）",
                 f"- 卡顿次数：`{representative_stutter_count}` 次",
                 "- 卡顿位置与时长：",
             ]
             if representative_stutter_events:
-                lines.extend(
-                    f"    - {index}. 完整音频位置 `{audio_start_us / 1000000.0:.3f}s`，"
-                    f"时长 `{gap_us / 1000.0:.2f}ms`"
-                    for index, (_analysis_start_us, audio_start_us, gap_us)
-                    in enumerate(representative_stutter_events, 1)
-                )
+                lines.extend(stutter_event_lines(representative_stutter_events))
             else:
                 lines.append("    - 无")
             lines += [

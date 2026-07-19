@@ -41,7 +41,7 @@ enum {
     DEFAULT_INTERVAL_MS = 100,
     DEFAULT_TIMEOUT_MS = 1000,
     DEFAULT_CONNECT_TIMEOUT_MS = 20000,
-    DEFAULT_DURATION_MS = 10000,
+    DEFAULT_DURATION_SEC = 10,
     DEFAULT_CONNECTIONS = 1,
     DEFAULT_FRAME_MS = 40,
     DEFAULT_LOG_LEVEL = 3,
@@ -79,7 +79,7 @@ typedef struct {
     int interval_ms;
     int timeout_ms;
     int connect_timeout_ms;
-    int duration_ms;
+    int64_t duration_sec;
     int frame_ms;
     int audio_iterations;
     int start_retries;
@@ -1458,10 +1458,10 @@ static int run_idle_command(const probe_config_t *config)
     }
 
     log_message(stdout,
-                "idle ramp started: target_connections=%d interval_ms=%d hold_duration_ms=%d",
+                "idle ramp started: target_connections=%d interval_ms=%d hold_duration_sec=%" PRId64,
                 config->connections,
                 config->interval_ms,
-                config->duration_ms);
+                config->duration_sec);
     for (i = 0; i < config->connections && !g_should_exit; ++i) {
         int rc;
         int64_t cost_us;
@@ -1505,7 +1505,7 @@ static int run_idle_command(const probe_config_t *config)
     hold_started_us = monotonic_now_us();
     next_status_us = hold_started_us;
     while (!g_should_exit &&
-           monotonic_now_us() - hold_started_us < (int64_t)config->duration_ms * 1000LL) {
+           (monotonic_now_us() - hold_started_us) / 1000000LL < config->duration_sec) {
         int64_t now_us = monotonic_now_us();
         if (now_us >= next_status_us) {
             int active = count_idle_connections(sessions, initialized);
@@ -1745,9 +1745,9 @@ static int run_audio_iteration(probe_session_t *session,
     while (!g_should_exit &&
            (input_opus == NULL || input_packet_index < input_opus->len) &&
            (!config->duration_explicit ||
-            monotonic_now_us() - start_us < (int64_t)config->duration_ms * 1000LL) &&
+            (monotonic_now_us() - start_us) / 1000000LL < config->duration_sec) &&
            (input_opus != NULL ||
-            monotonic_now_us() - start_us < (int64_t)config->duration_ms * 1000LL)) {
+            (monotonic_now_us() - start_us) / 1000000LL < config->duration_sec)) {
         int64_t now_us = monotonic_now_us();
         if (now_us >= next_send_us) {
             uint8_t tone_payload[AUDIO_PAYLOAD_BYTES];
@@ -2214,9 +2214,9 @@ static void print_usage(const char *program)
     fprintf(stderr,
             "Usage:\n"
             "  %s connect  --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--iterations <n>] [--connect-timeout-ms <ms>] [--start-retries <n>] [--log-level <1-5|11+>]\n"
-            "  %s idle     --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> --connections <n> [--duration-ms <ms>] [--interval-ms <ms>] [--connect-timeout-ms <ms>] [--log-level <1-5|11+>]\n"
+            "  %s idle     --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> --connections <n> [--duration-sec <seconds>] [--interval-ms <ms>] [--connect-timeout-ms <ms>] [--log-level <1-5|11+>]\n"
             "  %s timesync --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--repeat <n>] [--interval-ms <ms>] [--timeout-ms <ms>] [--log-level <1-5|11+>]\n"
-            "  %s audio    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--audio-input <ogg-opus-path> --audio-echo-output <ogg-opus-path>] [--audio-iterations <n>] [--duration-ms <ms>] [--frame-ms <ms>] [--repeat <n>] [--start-retries <n>] [--audio-sample-log <csv-path>] [--log-level <1-5|11+>]\n",
+            "  %s audio    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--audio-input <ogg-opus-path> --audio-echo-output <ogg-opus-path>] [--audio-iterations <n>] [--duration-sec <seconds>] [--frame-ms <ms>] [--repeat <n>] [--start-retries <n>] [--audio-sample-log <csv-path>] [--log-level <1-5|11+>]\n",
             program,
             program,
             program,
@@ -2238,6 +2238,21 @@ static int parse_int_value(const char *name, const char *value, int min_value, i
     return 0;
 }
 
+static int parse_positive_int64_value(const char *name, const char *value, int64_t *out)
+{
+    char *endptr;
+    long long parsed;
+
+    errno = 0;
+    parsed = strtoll(value, &endptr, 10);
+    if (errno != 0 || endptr == value || *endptr != '\0' || parsed <= 0) {
+        log_message(stderr, "invalid %s: %s", name, value);
+        return -1;
+    }
+    *out = (int64_t)parsed;
+    return 0;
+}
+
 static int parse_arguments(int argc, char **argv, probe_config_t *config)
 {
     int i;
@@ -2249,7 +2264,7 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
     config->interval_ms = DEFAULT_INTERVAL_MS;
     config->timeout_ms = DEFAULT_TIMEOUT_MS;
     config->connect_timeout_ms = DEFAULT_CONNECT_TIMEOUT_MS;
-    config->duration_ms = DEFAULT_DURATION_MS;
+    config->duration_sec = DEFAULT_DURATION_SEC;
     config->frame_ms = DEFAULT_FRAME_MS;
     config->audio_iterations = DEFAULT_ITERATIONS;
     config->start_retries = DEFAULT_START_RETRIES;
@@ -2287,7 +2302,7 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
             strcmp(arg, "--interval-ms") == 0 ||
             strcmp(arg, "--timeout-ms") == 0 ||
             strcmp(arg, "--connect-timeout-ms") == 0 ||
-            strcmp(arg, "--duration-ms") == 0 ||
+            strcmp(arg, "--duration-sec") == 0 ||
             strcmp(arg, "--audio-iterations") == 0 ||
             strcmp(arg, "--audio-sample-log") == 0 ||
             strcmp(arg, "--audio-input") == 0 ||
@@ -2327,10 +2342,10 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
             } else if (strcmp(arg, "--connect-timeout-ms") == 0 &&
                        parse_int_value(arg, argv[i + 1], 1, 120000, &config->connect_timeout_ms) != 0) {
                 return -1;
-            } else if (strcmp(arg, "--duration-ms") == 0 &&
-                       parse_int_value(arg, argv[i + 1], 1, 3600000, &config->duration_ms) != 0) {
+            } else if (strcmp(arg, "--duration-sec") == 0 &&
+                       parse_positive_int64_value(arg, argv[i + 1], &config->duration_sec) != 0) {
                 return -1;
-            } else if (strcmp(arg, "--duration-ms") == 0) {
+            } else if (strcmp(arg, "--duration-sec") == 0) {
                 config->duration_explicit = 1;
             } else if (strcmp(arg, "--audio-iterations") == 0 &&
                        parse_int_value(arg, argv[i + 1], 1, 10000, &config->audio_iterations) != 0) {
