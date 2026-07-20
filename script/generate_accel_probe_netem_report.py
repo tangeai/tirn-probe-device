@@ -90,21 +90,12 @@ def find_echo_audio(report_dir, stem, preferred_iteration=None):
 
 
 def infer_skip_frames(rows, skip_duration_ms):
-    frame_times = {}
-    for row in rows:
-        iteration = integer(row, "iteration", -1)
-        frame_ts_ms = integer(row, "frame_ts_ms", -1)
-        if iteration >= 0 and frame_ts_ms >= 0:
-            frame_times.setdefault(iteration, []).append(frame_ts_ms)
-    durations = []
-    for values in frame_times.values():
-        ordered = sorted(set(values))
-        durations.extend(right - left for left, right in zip(ordered, ordered[1:])
-                         if right > left)
-    frame_duration_ms = percentile(durations, 0.50) if durations else None
-    if not frame_duration_ms:
+    durations_us = [integer(row, "frame_duration_us") for row in rows
+                    if integer(row, "frame_duration_us") > 0]
+    frame_duration_us = percentile(durations_us, 0.50) if durations_us else None
+    if not frame_duration_us:
         return 0
-    return max(0, math.ceil(skip_duration_ms / frame_duration_ms))
+    return max(0, math.ceil(skip_duration_ms * 1000 / frame_duration_us))
 
 
 def read_audio_metrics(path, target_iterations=None, skip_frames=None, skip_duration_ms=10000):
@@ -150,56 +141,72 @@ def read_audio_metrics(path, target_iterations=None, skip_frames=None, skip_dura
         return result
     sent = len(rows)
     send_failed = sum(integer(row, "send_ret") < 0 for row in rows)
-    server_received = sum(integer(row, "observed") != 0 for row in rows)
-    echo_received = sum(integer(row, "echoed") != 0 for row in rows)
+    echo_received = sum(integer(row, "echo_received") != 0 for row in rows)
+    decode_statuses = [row.get("timestamp_decode_status", "") for row in rows]
+    one_way_unavailable = sum(status != "ok" for status in decode_statuses)
+    decode_failures = sum(status not in ("ok", "not_received") for status in decode_statuses)
+    duplicate_echoes = sum(integer(row, "duplicate_echo_count") for row in rows)
     result.update({
         "sent": str(sent),
         "send_failed": str(send_failed),
-        "server_received": str(server_received),
         "echo_received": str(echo_received),
-        "server_rate": f"{server_received * 100.0 / sent:.2f}" if sent else "0.00",
         "echo_rate": f"{echo_received * 100.0 / sent:.2f}" if sent else "0.00",
+        "one_way_unavailable": str(one_way_unavailable),
+        "timestamp_decode_failures": str(decode_failures),
+        "duplicate_echoes": str(duplicate_echoes),
+        "time_sync_rtt_us": str(max((integer(row, "time_sync_rtt_us") for row in rows), default=0)),
+        "clock_offset_us": str(max((integer(row, "clock_offset_us") for row in rows), default=0)),
     })
 
-    uplink = [integer(row, "uplink_us") for row in rows if integer(row, "observed") != 0]
-    downlink = [integer(row, "downlink_us") for row in rows
-                if integer(row, "observed") != 0 and integer(row, "echoed") != 0]
-    echo = [integer(row, "echo_us") for row in rows if integer(row, "echoed") != 0]
-    frame_intervals = [integer(row, "echo_arrival_gap_us") for row in rows
-                       if integer(row, "echo_arrival_gap_us") > 0]
+    valid_one_way = [row for row in rows if row.get("timestamp_decode_status") == "ok"]
+    uplink = [integer(row, "server_receive_unix_us") -
+              integer(row, "estimated_server_send_unix_us") for row in valid_one_way]
+    downlink = [integer(row, "client_echo_recv_unix_us") + integer(row, "clock_offset_us") -
+                integer(row, "server_receive_unix_us") for row in valid_one_way]
+    echo = [integer(row, "client_echo_recv_monotonic_us") -
+            integer(row, "client_send_monotonic_us") for row in rows
+            if integer(row, "echo_received") != 0]
+    frame_intervals = []
+    for iteration_rows in iterations.values():
+        arrivals = sorted(integer(row, "client_echo_recv_monotonic_us") for row in iteration_rows
+                          if integer(row, "echo_received") != 0)
+        frame_intervals.extend(right - left for left, right in zip(arrivals, arrivals[1:]))
     first_echo = []
     first_echo_by_iteration = {}
     stutter_rates = []
     stutter_rates_by_iteration = []
     stutter_events_by_iteration = {}
     for iteration, ordered in iterations.items():
-        if ordered and integer(ordered[0], "echoed") != 0:
-            first_echo_us = integer(ordered[0], "echo_us")
+        if ordered and integer(ordered[0], "echo_received") != 0:
+            first_echo_us = (integer(ordered[0], "client_echo_recv_monotonic_us") -
+                             integer(ordered[0], "client_send_monotonic_us"))
             first_echo.append(first_echo_us)
 
-        retained_echoed_rows = [row for row in ordered if integer(row, "echoed") != 0]
+        retained_echoed_rows = [row for row in ordered if integer(row, "echo_received") != 0]
         retained_stutter_rows = retained_echoed_rows[1:]
         full_ordered = sorted(
             all_iterations[iteration], key=lambda row: integer(row, "send_index")
         )
-        frame_times = sorted({integer(row, "frame_ts_ms") for row in full_ordered})
-        frame_durations = [right - left for left, right in zip(frame_times, frame_times[1:])
-                           if right > left]
-        frame_duration_us = int(percentile(frame_durations, 0.50) * 1000) \
-            if frame_durations else 0
+        frame_durations = [integer(row, "frame_duration_us") for row in full_ordered
+                           if integer(row, "frame_duration_us") > 0]
+        frame_duration_us = int(percentile(frame_durations, 0.50)) if frame_durations else 0
         echoed_by_arrival = sorted(
             (row for row in full_ordered
-             if integer(row, "echoed") != 0 and integer(row, "client_echo_recv_unix_ns") > 0),
-            key=lambda row: integer(row, "client_echo_recv_unix_ns"),
+             if integer(row, "echo_received") != 0 and
+             integer(row, "client_echo_recv_monotonic_us") > 0),
+            key=lambda row: integer(row, "client_echo_recv_monotonic_us"),
         )
         if echoed_by_arrival:
-            first_echo_by_iteration[iteration] = integer(echoed_by_arrival[0], "echo_us")
+            first_echo_by_iteration[iteration] = (
+                integer(echoed_by_arrival[0], "client_echo_recv_monotonic_us") -
+                integer(echoed_by_arrival[0], "client_send_monotonic_us")
+            )
         playback_stutters = {}
         if echoed_by_arrival:
-            first_echo_ns = integer(echoed_by_arrival[0], "client_echo_recv_unix_ns")
+            first_echo_ns = integer(echoed_by_arrival[0], "client_echo_recv_monotonic_us")
             playback_end_us = 0
             for row in echoed_by_arrival:
-                arrival_us = (integer(row, "client_echo_recv_unix_ns") - first_echo_ns) // 1000
+                arrival_us = integer(row, "client_echo_recv_monotonic_us") - first_echo_ns
                 playback_gap_us = max(0, arrival_us - playback_end_us)
                 if playback_gap_us > STUTTER_THRESHOLD_US:
                     playback_stutters[integer(row, "send_index")] = (
@@ -214,21 +221,20 @@ def read_audio_metrics(path, target_iterations=None, skip_frames=None, skip_dura
         }
         stutter_time_us = sum(gap_us for _, gap_us in retained_playback_stutters.values())
         call_duration_us = max((integer(row, "call_duration_us") for row in ordered), default=0)
-        if call_duration_us <= 0 and ordered:
-            send_times = [integer(row, "client_send_unix_ns") for row in ordered]
-            call_duration_us = max(send_times) // 1000 - min(send_times) // 1000
-            call_duration_us += frame_duration_us + 1000000
+        if call_duration_us <= 0:
+            send_times = [integer(row, "client_send_monotonic_us") for row in ordered]
+            call_duration_us = max(send_times) - min(send_times) + frame_duration_us + 1000000
         stutter_rate = stutter_time_us * 100.0 / call_duration_us \
             if call_duration_us > 0 else 0.0
         stutter_rates.append(stutter_rate)
         stutter_rates_by_iteration.append((stutter_rate, iteration))
 
-        echoed_rows = [row for row in full_ordered if integer(row, "echoed") != 0]
-        first_echo_ns = integer(echoed_rows[0], "client_echo_recv_unix_ns") \
+        echoed_rows = [row for row in full_ordered if integer(row, "echo_received") != 0]
+        first_echo_ns = integer(echoed_rows[0], "client_echo_recv_monotonic_us") \
             if echoed_rows else 0
-        analysis_origin_ns = integer(retained_echoed_rows[0], "client_echo_recv_unix_ns") \
+        analysis_origin_ns = integer(retained_echoed_rows[0], "client_echo_recv_monotonic_us") \
             if retained_echoed_rows else first_echo_ns
-        analysis_origin_us = max(0, (analysis_origin_ns - first_echo_ns) // 1000)
+        analysis_origin_us = max(0, analysis_origin_ns - first_echo_ns)
         events = []
         for start_us, gap_us in retained_playback_stutters.values():
             analysis_start_us = max(0, start_us - analysis_origin_us)
@@ -440,8 +446,7 @@ def main():
         "`audio-samples/*.csv` 重新计算，不从日志读取音频汇总。",
         f"每轮计算前固定跳过起始帧：`{args.audio_skip_frames}` 帧。" if args.audio_skip_frames is not None else
         f"每轮计算前根据 CSV 帧间隔换算并跳过约 `{args.audio_skip_duration_ms}ms` 的起始帧。",
-        "旧 CSV 未记录实际 call duration，卡顿占比按发送时间轴、末帧时长和 1 秒收包窗口推导；"
-        "缺少采样 CSV 时音频指标显示 `—`。",
+        "报告只支持包含原始微秒时间字段的新 CSV；缺少采样 CSV 时音频指标显示 `—`。",
         "",
         "## 卡顿计算公式",
         "",
@@ -450,7 +455,7 @@ def main():
         "- 单次卡顿时长：`stutter_i = playback_gap_i`。快速连续到达的帧排队播放，不产生负缺口。",
         "- 单轮卡顿占比：`stutter_rate = Σ stutter_i / call_duration × 100%`。",
         "- 表格中的卡顿平均/P50/P90/P95/P99，是先计算每轮卡顿占比，再对各成功轮次做分布统计。",
-        "- 报告计算时每轮跳过约 10 秒起始帧；旧 CSV 没有 `call_duration_us` 时，分母按保留帧的发送时间跨度、末帧时长及 1 秒回声等待窗口推导。",
+        "- 报告计算时每轮跳过约 10 秒起始帧；分母按保留帧的单调发送时间跨度、末帧时长及 1 秒收包窗口推导。",
         "",
         "## Connect 结果",
         "",
@@ -474,7 +479,7 @@ def main():
         "",
         "## Audio 结果",
         "",
-        "| Delay | 上行 Loss | 下行 Loss | Ping | 成功轮次 | 发送/失败 | 服务端收包率 | 回声率 | 上行延迟 | 下行延迟 | 帧间隔分布 | 卡顿 | 首包回声 | 回声音频 | 状态 | 退出码 | 样本 CSV | 日志 | 测试脚本 |",
+        "| Delay | 上行 Loss | 下行 Loss | Ping | 成功轮次 | 发送/失败 | 回声率 | 单向诊断 | 上行延迟 | 下行延迟 | 帧间隔分布 | 卡顿 | 首包回声 | 回声音频 | 状态 | 退出码 | 样本 CSV | 日志 | 测试脚本 |",
         "|---:|---:|---:|---|---:|---:|---:|---:|---|---|---|---|---|---|---|---:|---|---|---|",
     ]
     echo_audio_entries = []
@@ -525,9 +530,15 @@ def main():
             ("P95", "echo_latency_p95"),
             ("P99", "echo_latency_p99"),
         ), "ms")
+        one_way_diagnostics = (
+            f"不可用 {value(case, 'one_way_unavailable')}<br>"
+            f"解码失败 {value(case, 'timestamp_decode_failures')}<br>"
+            f"对时RTT {value(case, 'time_sync_rtt_us', 'μs')}<br>"
+            f"时钟偏移 {value(case, 'clock_offset_us', 'μs')}"
+        )
         lines.append(
             f"| {delay}ms | {uplink_loss}% | {downlink_loss}% | {ping_cell(case)} | {rounds} | {sent} | "
-            f"{value(case, 'server_rate', '%')} | {value(case, 'echo_rate', '%')} | {uplink} | {downlink} | "
+            f"{value(case, 'echo_rate', '%')} | {one_way_diagnostics} | {uplink} | {downlink} | "
             f"{frame_interval} | {stutter} | "
             f"{echo} | {echo_audio_cell} | {status_cell(case)} | {value(case, 'exit_code')} | "
             f"[{Path(sample_rel).name}]({sample_rel}) | [{Path(rel).name}]({rel}) | "

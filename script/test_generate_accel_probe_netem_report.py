@@ -48,11 +48,11 @@ class ParseLogTest(unittest.TestCase):
 
     def test_audio_metrics_are_recalculated_from_csv(self):
         csv_text = """\
-iteration,send_index,frame_ts_ms,send_ret,send_late_us,observed,echoed,client_send_unix_ns,server_recv_unix_ns,client_echo_recv_unix_ns,uplink_us,downlink_us,echo_us,echo_arrival_gap_us,stutter,stutter_time_us
-1,1,1000,10,0,1,1,1000000000,1010000000,1030000000,10000,20000,30000,0,0,0
-1,2,1040,-1,0,0,0,1040000000,0,0,0,0,0,0,0,0
-1,3,1080,10,0,1,1,1080000000,1090000000,1430000000,10000,340000,350000,400000,1,400000
-2,1,2000,10,0,1,1,2000000000,2015000000,2035000000,15000,20000,35000,0,0,0
+iteration,send_index,frame_index,frame_duration_us,send_ret,send_late_us,client_send_unix_us,client_send_monotonic_us,estimated_server_send_unix_us,clock_offset_us,time_sync_rtt_us,outbound_packed_ts,echo_received,echo_packed_ts,server_receive_unix_us,client_echo_recv_unix_us,client_echo_recv_monotonic_us,timestamp_decode_status,duplicate_echo_count
+1,1,1,40000,10,0,1000000,1000000,1000000,0,20000,0,1,0,1010000,1030000,1030000,ok,0
+1,2,2,40000,-1,0,1040000,1040000,1040000,0,20000,0,0,0,0,0,0,not_received,0
+1,3,3,40000,10,0,1080000,1080000,1080000,0,20000,0,1,0,1090000,1430000,1430000,ok,0
+2,1,1,40000,10,0,2000000,2000000,2000000,0,20000,0,1,0,2015000,2035000,2035000,ok,0
 """
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "audio_delay_000_loss_00.csv"
@@ -64,10 +64,9 @@ iteration,send_index,frame_ts_ms,send_ret,send_late_us,observed,echoed,client_se
         self.assertEqual(result["audio_total"], "2")
         self.assertEqual(result["sent"], "4")
         self.assertEqual(result["send_failed"], "1")
-        self.assertEqual(result["server_received"], "3")
         self.assertEqual(result["echo_received"], "3")
-        self.assertEqual(result["server_rate"], "75.00")
         self.assertEqual(result["echo_rate"], "75.00")
+        self.assertEqual(result["one_way_unavailable"], "1")
         self.assertEqual(result["uplink_latency_avg"], "11.67")
         self.assertEqual(result["downlink_latency_avg"], "126.67")
         self.assertEqual(result["echo_latency_avg"], "32.50")
@@ -80,7 +79,7 @@ iteration,send_index,frame_ts_ms,send_ret,send_late_us,observed,echoed,client_se
         self.assertEqual(skipped_result["stutter_avg"], "0.00")
         self.assertEqual(skipped_result["representative_stutter_count"], "0")
         self.assertEqual(REPORT.infer_skip_frames([
-            {"iteration": "1", "frame_ts_ms": str(index * 40)} for index in range(251)
+            {"iteration": "1", "frame_duration_us": "40000"} for _ in range(251)
         ], 10000), 250)
 
     def test_audio_log_summary_is_not_used_without_csv(self):

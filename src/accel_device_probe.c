@@ -29,7 +29,6 @@
 enum {
     CMD_TIME_SYNC_REQUEST = 0x2003,
     CMD_TIME_SYNC_RESPONSE = 0x2004,
-    CMD_AUDIO_PACKET_OBSERVED = 0x2005,
 
     AUDIO_STREAM_ID = 0,
     AUDIO_SAMPLE_RATE_HZ = 8000,
@@ -50,7 +49,17 @@ enum {
     DISCONNECT_TIMEOUT_MS = 3000,
     CALLBACK_EVENT_RING_CAP = 2048,
     CALLBACK_EVENT_DATA_BYTES = 2048,
+
+    AUDIO_TS_INDEX_BITS = 12,
+    AUDIO_TS_INDEX_MASK = 0x0fff,
+    AUDIO_TS_TIME_MASK = 0x0fffff,
+    AUDIO_ECHO_WAIT_TIMEOUT_SEC = 75,
+    AUDIO_ECHO_IDLE_GRACE_MS = 2000,
 };
+
+static const int64_t kAudioTimestampUnitUs = 100LL;
+static const int64_t kAudioTimestampPeriodUs = 104857600LL;
+static const int64_t kAudioTimestampToleranceUs = 2000000LL;
 
 static const uint32_t kSdkMaxSendBufferBytes = 2U * 1024U * 1024U;
 static const char kClientIdSuffix[] = "-accel-probe";
@@ -108,18 +117,23 @@ typedef struct {
 
 typedef struct {
     uint32_t send_index;
-    uint32_t frame_ts_ms;
-    int64_t client_send_unix_ns;
+    uint32_t frame_index;
+    uint32_t frame_duration_us;
+    uint32_t outbound_packed_ts;
+    uint32_t echo_packed_ts;
+    int64_t client_send_unix_us;
     int64_t client_send_mono_us;
+    int64_t estimated_server_send_us;
+    int64_t clock_offset_us;
+    int64_t time_sync_rtt_us;
     int64_t send_late_us;
     int64_t client_echo_recv_mono_us;
-    int64_t server_recv_unix_ns;
+    int64_t client_echo_recv_unix_us;
+    int64_t server_recv_unix_us;
     int send_ret;
-    int observed;
     int echoed;
-    int64_t echo_arrival_gap_us;
-    int64_t stutter_time_us;
-    int stutter;
+    int duplicate_echo_count;
+    const char *timestamp_decode_status;
 } audio_sample_t;
 
 typedef struct {
@@ -127,18 +141,14 @@ typedef struct {
     size_t len;
     size_t cap;
     uint32_t next_frame_index;
-    int64_t first_client_send_unix_ns;
-    int64_t first_server_recv_unix_ns;
-    int64_t first_echo_recv_unix_ns;
+    int64_t first_client_send_unix_us;
     int64_t first_echo_recv_mono_us;
     int64_t last_echo_recv_mono_us;
-    int64_t stutter_time_us;
     int64_t call_started_mono_us;
     int64_t call_finished_mono_us;
     int64_t max_send_late_us;
     int expected_frame_ms;
     uint64_t late_send_count;
-    uint64_t stutter_count;
     uint64_t send_count;
     uint64_t send_failed;
     uint64_t echo_count;
@@ -384,11 +394,6 @@ static double us_to_ms(int64_t value_us)
     return (double)value_us / 1000.0;
 }
 
-static double ns_to_s(int64_t value_ns)
-{
-    return (double)value_ns / 1000000000.0;
-}
-
 static void print_duration_summary_ms(const char *name, sample_set_t *set)
 {
     if (set->len == 0) {
@@ -404,66 +409,6 @@ static void print_duration_summary_ms(const char *name, sample_set_t *set)
            us_to_ms(percentile_sorted(set, 0.90)),
            us_to_ms(percentile_sorted(set, 0.95)),
            us_to_ms(percentile_sorted(set, 0.99)));
-}
-
-static void print_duration_summary_ms_cn(const char *name, sample_set_t *set)
-{
-    if (set->len == 0) {
-        printf("%s: 无样本\n", name);
-        return;
-    }
-    qsort(set->values, set->len, sizeof(*set->values), compare_i64);
-    printf("%s: 样本数=%zu 平均=%.2fms 中位数=%.2fms P90=%.2fms P95=%.2fms P99=%.2fms\n",
-           name,
-           set->len,
-           average_samples(set) / 1000.0,
-           us_to_ms(percentile_sorted(set, 0.50)),
-           us_to_ms(percentile_sorted(set, 0.90)),
-           us_to_ms(percentile_sorted(set, 0.95)),
-           us_to_ms(percentile_sorted(set, 0.99)));
-}
-
-static void print_value_summary_cn(const char *name, sample_set_t *set)
-{
-    if (set->len == 0) {
-        printf("%s: 无样本\n", name);
-        return;
-    }
-    qsort(set->values, set->len, sizeof(*set->values), compare_i64);
-    printf("%s: 样本数=%zu 平均=%.2f 中位数=%" PRId64 " P90=%" PRId64 " P95=%" PRId64 " P99=%" PRId64 "\n",
-           name,
-           set->len,
-           average_samples(set),
-           percentile_sorted(set, 0.50),
-           percentile_sorted(set, 0.90),
-           percentile_sorted(set, 0.95),
-           percentile_sorted(set, 0.99));
-}
-
-static void print_percent_summary_cn(const char *name, sample_set_t *set)
-{
-    if (set->len == 0) {
-        printf("%s: 无样本\n", name);
-        return;
-    }
-    qsort(set->values, set->len, sizeof(*set->values), compare_i64);
-    printf("%s: 样本数=%zu 平均=%.2f%% 中位数=%.2f%% P90=%.2f%% P95=%.2f%% P99=%.2f%%\n",
-           name,
-           set->len,
-           average_samples(set) / 10000.0,
-           (double)percentile_sorted(set, 0.50) / 10000.0,
-           (double)percentile_sorted(set, 0.90) / 10000.0,
-           (double)percentile_sorted(set, 0.95) / 10000.0,
-           (double)percentile_sorted(set, 0.99) / 10000.0);
-}
-
-static void sample_set_append_all(sample_set_t *dst, const sample_set_t *src)
-{
-    size_t i;
-
-    for (i = 0; i < src->len; ++i) {
-        (void)sample_set_push(dst, src->values[i]);
-    }
 }
 
 static char *build_client_id(const char *device_id)
@@ -532,23 +477,115 @@ static char *copy_payload_as_string(const void *data, uint32_t len)
     return text;
 }
 
-static audio_sample_t *audio_metrics_find(audio_metrics_t *metrics, uint32_t frame_ts_ms)
+static uint32_t pack_audio_timestamp(int64_t unix_us, uint32_t frame_index)
+{
+    uint32_t tick = (uint32_t)(unix_us / kAudioTimestampUnitUs) & AUDIO_TS_TIME_MASK;
+    return (tick << AUDIO_TS_INDEX_BITS) | (frame_index & AUDIO_TS_INDEX_MASK);
+}
+
+static uint32_t unpack_audio_frame_index(uint32_t packed)
+{
+    return packed & AUDIO_TS_INDEX_MASK;
+}
+
+static int reconstruct_audio_timestamp_us(uint32_t packed,
+                                          int64_t lower_us,
+                                          int64_t upper_us,
+                                          int64_t *out_us)
+{
+    int64_t encoded_us = (int64_t)(packed >> AUDIO_TS_INDEX_BITS) * kAudioTimestampUnitUs;
+    int64_t cycle = (lower_us - encoded_us) / kAudioTimestampPeriodUs;
+    int count = 0;
+    int64_t candidate;
+
+    if (encoded_us + cycle * kAudioTimestampPeriodUs < lower_us) {
+        cycle++;
+    }
+    for (candidate = encoded_us + cycle * kAudioTimestampPeriodUs;
+         candidate <= upper_us;
+         candidate += kAudioTimestampPeriodUs) {
+        *out_us = candidate;
+        count++;
+        if (count > 1) {
+            break;
+        }
+    }
+    return count;
+}
+
+static audio_sample_t *audio_metrics_find(audio_metrics_t *metrics,
+                                          uint32_t frame_index,
+                                          uint32_t packed,
+                                          int64_t echo_recv_unix_us,
+                                          int *ambiguous,
+                                          int *duplicate)
 {
     size_t i;
+    audio_sample_t *only_index_match = NULL;
+    audio_sample_t *valid_match = NULL;
+    audio_sample_t *echoed = NULL;
+    int index_matches = 0;
+    int valid_matches = 0;
 
+    *ambiguous = 0;
+    *duplicate = 0;
     for (i = 0; i < metrics->len; ++i) {
-        if (metrics->items[i].frame_ts_ms == frame_ts_ms) {
-            return &metrics->items[i];
+        if ((metrics->items[i].frame_index & AUDIO_TS_INDEX_MASK) != frame_index) {
+            continue;
         }
+        if (metrics->items[i].echoed) {
+            echoed = &metrics->items[i];
+        } else {
+            int64_t candidate_us = 0;
+            int64_t lower_us = metrics->items[i].estimated_server_send_us -
+                               kAudioTimestampToleranceUs;
+            int64_t upper_us = echo_recv_unix_us + metrics->items[i].clock_offset_us +
+                               kAudioTimestampToleranceUs;
+            int candidates = reconstruct_audio_timestamp_us(packed,
+                                                            lower_us,
+                                                            upper_us,
+                                                            &candidate_us);
+            only_index_match = &metrics->items[i];
+            index_matches++;
+            if (candidates == 1) {
+                valid_match = &metrics->items[i];
+                valid_matches++;
+            }
+        }
+    }
+    if (valid_matches == 1) {
+        return valid_match;
+    }
+    if (valid_matches > 1 || index_matches > 1) {
+        for (i = 0; i < metrics->len; ++i) {
+            if (!metrics->items[i].echoed &&
+                (metrics->items[i].frame_index & AUDIO_TS_INDEX_MASK) == frame_index) {
+                metrics->items[i].timestamp_decode_status = "ambiguous_frame_index";
+            }
+        }
+        *ambiguous = 1;
+        return NULL;
+    }
+    if (index_matches == 1) {
+        return only_index_match;
+    }
+    if (echoed != NULL) {
+        echoed->duplicate_echo_count++;
+        *duplicate = 1;
     }
     return NULL;
 }
 
 static audio_sample_t *audio_metrics_append(audio_metrics_t *metrics,
                                             uint32_t send_index,
-                                            uint32_t frame_ts_ms,
-                                            int64_t send_unix_ns,
+                                            uint32_t frame_index,
+                                            uint32_t frame_duration_us,
+                                            uint32_t outbound_packed_ts,
+                                            int64_t send_unix_us,
                                             int64_t send_mono_us,
+                                            int64_t estimated_server_send_us,
+                                            int64_t clock_offset_us,
+                                            int64_t time_sync_rtt_us,
                                             int64_t send_late_us)
 {
     audio_sample_t *new_items;
@@ -567,93 +604,18 @@ static audio_sample_t *audio_metrics_append(audio_metrics_t *metrics,
     sample = &metrics->items[metrics->len++];
     memset(sample, 0, sizeof(*sample));
     sample->send_index = send_index;
-    sample->frame_ts_ms = frame_ts_ms;
-    sample->client_send_unix_ns = send_unix_ns;
+    sample->frame_index = frame_index;
+    sample->frame_duration_us = frame_duration_us;
+    sample->outbound_packed_ts = outbound_packed_ts;
+    sample->client_send_unix_us = send_unix_us;
     sample->client_send_mono_us = send_mono_us;
+    sample->estimated_server_send_us = estimated_server_send_us;
+    sample->clock_offset_us = clock_offset_us;
+    sample->time_sync_rtt_us = time_sync_rtt_us;
     sample->send_late_us = send_late_us;
     sample->send_ret = 0;
+    sample->timestamp_decode_status = "not_received";
     return sample;
-}
-
-static void print_missing_audio_ranges(const char *label, const audio_metrics_t *metrics, int observed_field)
-{
-    int in_range = 0;
-    uint32_t range_start = 0;
-    uint32_t range_end = 0;
-    int printed = 0;
-    size_t i;
-
-    printf("%s: ", label);
-    for (i = 0; i < metrics->len; ++i) {
-        const audio_sample_t *sample = &metrics->items[i];
-        int present = observed_field ? sample->observed : sample->echoed;
-        if (!present) {
-            if (!in_range) {
-                range_start = sample->send_index;
-                in_range = 1;
-            }
-            range_end = sample->send_index;
-            continue;
-        }
-        if (in_range) {
-            printf("%s%u", printed ? "," : "", range_start);
-            if (range_end != range_start) {
-                printf("-%u", range_end);
-            }
-            printed = 1;
-            in_range = 0;
-        }
-    }
-    if (in_range) {
-        printf("%s%u", printed ? "," : "", range_start);
-        if (range_end != range_start) {
-            printf("-%u", range_end);
-        }
-        printed = 1;
-    }
-    if (!printed) {
-        printf("无");
-    }
-    printf("\n");
-}
-
-static void print_missing_audio_details(const char *label, const audio_metrics_t *metrics, int observed_field)
-{
-    size_t i;
-    size_t printed = 0;
-    size_t missing_count = 0;
-    const size_t max_print = 80U;
-
-    for (i = 0; i < metrics->len; ++i) {
-        const audio_sample_t *sample = &metrics->items[i];
-        int present = observed_field ? sample->observed : sample->echoed;
-        if (!present) {
-            missing_count++;
-        }
-    }
-    if (missing_count == 0) {
-        return;
-    }
-
-    printf("%s: 缺失数=%zu", label, missing_count);
-    for (i = 0; i < metrics->len && printed < max_print; ++i) {
-        const audio_sample_t *sample = &metrics->items[i];
-        int present = observed_field ? sample->observed : sample->echoed;
-        if (present) {
-            continue;
-        }
-        printf(" #%u(send_unix=%.6f, since_start=%.2fms, late=%.2fms, send_ret=%d)",
-               sample->send_index,
-               ns_to_s(sample->client_send_unix_ns),
-               us_to_ms(sample->client_send_mono_us - metrics->call_started_mono_us),
-               us_to_ms(sample->send_late_us),
-               sample->send_ret);
-        printed++;
-    }
-    if (missing_count > printed) {
-        printf(" ... 省略=%zu", missing_count - printed);
-    }
-    printf("\n");
 }
 
 static void audio_metrics_free(audio_metrics_t *metrics)
@@ -831,20 +793,6 @@ static void handle_command(tirtc_conn_t hconn, uint32_t cmdw, const void *data, 
             session->timesync_done = 1;
             pthread_cond_broadcast(&session->cond);
         }
-    } else if (cmdw == CMD_AUDIO_PACKET_OBSERVED) {
-        uint32_t frame_ts_ms = 0;
-        int64_t server_recv_unix_ns = 0;
-        if (json_get_u32(json, "frame_ts_ms", &frame_ts_ms) == 0 &&
-            json_get_i64(json, "received_at_unix_ns", &server_recv_unix_ns) == 0) {
-            audio_sample_t *sample = audio_metrics_find(&session->audio, frame_ts_ms);
-            if (sample != NULL) {
-                sample->server_recv_unix_ns = server_recv_unix_ns;
-                sample->observed = 1;
-            }
-            if (session->audio.first_server_recv_unix_ns == 0) {
-                session->audio.first_server_recv_unix_ns = server_recv_unix_ns;
-            }
-        }
     }
     pthread_mutex_unlock(&session->mutex);
     free(json);
@@ -853,12 +801,10 @@ static void handle_command(tirtc_conn_t hconn, uint32_t cmdw, const void *data, 
 static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *data)
 {
     probe_session_t *session = active_session_for_conn(hconn);
-    uint32_t frame_ts_ms;
+    uint32_t frame_index;
     int64_t now_mono_us;
-    int64_t now_unix_ns;
+    int64_t now_unix_us;
     audio_sample_t *sample;
-    int64_t gap_us;
-    int64_t playback_gap_us = 0;
     uint32_t duration_samples;
     int new_echo = 0;
 
@@ -872,30 +818,57 @@ static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *d
         (void)TiRtcSendAudioStream(hconn, info, data);
         return;
     }
-    frame_ts_ms = info->ts;
+    frame_index = unpack_audio_frame_index(info->ts);
 
     now_mono_us = monotonic_now_us();
-    now_unix_ns = realtime_now_ns();
+    now_unix_us = realtime_now_ns() / 1000LL;
     duration_samples = info->media == TIRTC_AUDIO_OPUS ?
         ogg_opus_packet_duration_samples_48k(data, info->length) :
         (session->audio.expected_frame_ms > 0 ?
          (uint32_t)session->audio.expected_frame_ms * 48U : 0);
 
     pthread_mutex_lock(&session->mutex);
-    sample = audio_metrics_find(&session->audio, frame_ts_ms);
+    {
+        int ambiguous = 0;
+        int duplicate = 0;
+        sample = audio_metrics_find(&session->audio,
+                                    frame_index,
+                                    info->ts,
+                                    now_unix_us,
+                                    &ambiguous,
+                                    &duplicate);
+        if (ambiguous) {
+            log_message(stderr, "ambiguous echoed audio frame_index=%" PRIu32, frame_index);
+        } else if (duplicate) {
+            log_message(stderr, "duplicate echoed audio frame_index=%" PRIu32, frame_index);
+        }
+    }
     if (sample != NULL && !sample->echoed) {
+        int64_t lower_us = sample->estimated_server_send_us - kAudioTimestampToleranceUs;
+        int64_t upper_us = now_unix_us + sample->clock_offset_us + kAudioTimestampToleranceUs;
+        int candidates;
+
         new_echo = 1;
         sample->client_echo_recv_mono_us = now_mono_us;
+        sample->client_echo_recv_unix_us = now_unix_us;
+        sample->echo_packed_ts = info->ts;
         sample->echoed = 1;
+        candidates = reconstruct_audio_timestamp_us(info->ts,
+                                                    lower_us,
+                                                    upper_us,
+                                                    &sample->server_recv_unix_us);
+        if (candidates == 0) {
+            sample->timestamp_decode_status = "invalid_time_window";
+            sample->server_recv_unix_us = 0;
+        } else if (candidates > 1) {
+            sample->timestamp_decode_status = "ambiguous_time_period";
+            sample->server_recv_unix_us = 0;
+        } else if (sample->server_recv_unix_us < sample->estimated_server_send_us) {
+            sample->timestamp_decode_status = "clock_uncertain";
+        } else {
+            sample->timestamp_decode_status = "ok";
+        }
         session->audio.echo_count++;
-        if (session->audio.first_echo_recv_unix_ns == 0) {
-            session->audio.first_echo_recv_unix_ns = now_unix_ns;
-            session->audio.first_echo_recv_mono_us = now_mono_us;
-        }
-        if (session->audio.last_echo_recv_mono_us > 0) {
-            gap_us = now_mono_us - session->audio.last_echo_recv_mono_us;
-            sample->echo_arrival_gap_us = gap_us;
-        }
         session->audio.last_echo_recv_mono_us = now_mono_us;
     }
     if (new_echo && duration_samples > 0) {
@@ -912,13 +885,6 @@ static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *d
             (uint64_t)(now_mono_us - session->echo_timeline_origin_us) * 48U / 1000U;
         missing_samples = arrival_start_granule > session->echo_last_granule ?
             arrival_start_granule - session->echo_last_granule : 0;
-        playback_gap_us = (int64_t)(missing_samples * 1000U / 48U);
-        if (playback_gap_us > 300000LL && sample != NULL) {
-            sample->stutter = 1;
-            sample->stutter_time_us = playback_gap_us;
-            session->audio.stutter_count++;
-            session->audio.stutter_time_us += playback_gap_us;
-        }
         silence_frames = (missing_samples + 480U) / 960U;
         for (silence_index = 0; silence_index < silence_frames; ++silence_index) {
             session->echo_last_granule += 960U;
@@ -1597,8 +1563,7 @@ static void make_audio_payload(uint8_t *payload, uint32_t frame_index)
 
 static void write_audio_sample_log(FILE *stream,
                                    int success_iteration,
-                                   const audio_metrics_t *audio,
-                                   int64_t offset_ns)
+                                   const audio_metrics_t *audio)
 {
     size_t i;
 
@@ -1607,34 +1572,30 @@ static void write_audio_sample_log(FILE *stream,
     }
     for (i = 0; i < audio->len; ++i) {
         const audio_sample_t *sample = &audio->items[i];
-        int64_t echo_us = sample->echoed ?
-            sample->client_echo_recv_mono_us - sample->client_send_mono_us : 0;
-        int64_t echo_recv_unix_ns = sample->echoed ?
-            sample->client_send_unix_ns + echo_us * 1000LL : 0;
-        int64_t uplink_us = sample->observed ?
-            (sample->server_recv_unix_ns - (sample->client_send_unix_ns + offset_ns)) / 1000LL : 0;
-        int64_t downlink_us = sample->observed && sample->echoed ?
-            ((echo_recv_unix_ns + offset_ns) - sample->server_recv_unix_ns) / 1000LL : 0;
-
         fprintf(stream,
-                "%d,%" PRIu32 ",%" PRIu32 ",%d,%" PRId64 ",%d,%d,%" PRId64 ",%" PRId64
-                ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%d,%" PRId64 "\n",
+                "%d,%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%d,%" PRId64 ",%" PRId64
+                ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRIu32 ",%d,%" PRIu32
+                ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%s,%d\n",
                 success_iteration,
                 sample->send_index,
-                sample->frame_ts_ms,
+                sample->frame_index,
+                sample->frame_duration_us,
                 sample->send_ret,
                 sample->send_late_us,
-                sample->observed,
+                sample->client_send_unix_us,
+                sample->client_send_mono_us,
+                sample->estimated_server_send_us,
+                sample->clock_offset_us,
+                sample->time_sync_rtt_us,
+                sample->outbound_packed_ts,
                 sample->echoed,
-                sample->client_send_unix_ns,
-                sample->server_recv_unix_ns,
-                echo_recv_unix_ns,
-                uplink_us,
-                downlink_us,
-                echo_us,
-                sample->echo_arrival_gap_us,
-                sample->stutter,
-                sample->stutter_time_us);
+                sample->echo_packed_ts,
+                sample->server_recv_unix_us,
+                sample->client_echo_recv_unix_us,
+                sample->client_echo_recv_mono_us,
+                audio->call_finished_mono_us - audio->call_started_mono_us,
+                sample->timestamp_decode_status,
+                sample->duplicate_echo_count);
     }
     fflush(stream);
 }
@@ -1643,43 +1604,23 @@ static int run_audio_iteration(probe_session_t *session,
                                const probe_config_t *config,
                                const ogg_opus_file_t *input_opus,
                                int64_t offset_ns,
+                               int64_t time_sync_rtt_us,
                                int success_iteration,
                                int target_success_iterations,
                                FILE *sample_log,
-                               sample_set_t *first_d2s_us,
-                               sample_set_t *first_echo_us,
-                               sample_set_t *all_d2s_us,
-                               sample_set_t *all_s2d_us,
-                               sample_set_t *stutter_counts,
-                               sample_set_t *stutter_time_us,
-                               sample_set_t *stutter_rate_ppm,
                                uint64_t *total_sent,
                                uint64_t *total_send_failed,
-                               uint64_t *total_server_observed,
                                uint64_t *total_echo_received)
 {
     int64_t start_us;
     int64_t next_send_us;
-    uint32_t base_ts_ms;
-    sample_set_t d2s_us = {0};
-    sample_set_t echo_us = {0};
-    sample_set_t s2d_us = {0};
-    int first_d2s_valid = 0;
-    int first_echo_valid = 0;
-    int64_t first_d2s_value_us = 0;
-    int64_t first_echo_value_us = 0;
-    uint64_t iteration_stutter_count = 0;
-    int64_t iteration_stutter_time_us = 0;
-    int64_t iteration_stutter_rate_ppm = 0;
     int64_t loop_cpu_start_ns;
     int64_t loop_cpu_ns;
     int64_t prepare_cpu_ns = 0;
     int64_t payload_cpu_ns = 0;
     int64_t sdk_send_cpu_ns = 0;
     int64_t post_send_cpu_ns = 0;
-    size_t i;
     size_t input_packet_index = 0;
-    uint64_t input_timeline_samples = 0;
     char *echo_output_path = NULL;
     uint8_t opus_audio_flags = 0;
 
@@ -1731,7 +1672,6 @@ static int run_audio_iteration(probe_session_t *session,
     }
     start_us = monotonic_now_us();
     next_send_us = start_us;
-    base_ts_ms = (uint32_t)(realtime_now_ns() / 1000000LL);
     pthread_mutex_lock(&session->mutex);
     audio_metrics_reset_iteration(&session->audio);
     session->echo_timeline_origin_us = 0;
@@ -1756,12 +1696,14 @@ static int run_audio_iteration(probe_session_t *session,
             uint32_t packet_duration_samples;
             int packet_duration_ms;
             TIRTCFRAMEINFO info;
-            uint32_t frame_ts_ms;
+            uint32_t outbound_packed_ts;
             uint32_t frame_index;
             size_t sample_index;
             int64_t segment_cpu_start_ns = thread_cpu_now_ns();
-            int64_t send_unix_ns = realtime_now_ns();
+            int64_t send_unix_us = realtime_now_ns() / 1000LL;
             int64_t send_mono_us = monotonic_now_us();
+            int64_t clock_offset_us = offset_ns / 1000LL;
+            int64_t estimated_server_send_us = send_unix_us + clock_offset_us;
             int64_t send_late_us = now_us - next_send_us;
             int send_ret;
 
@@ -1771,19 +1713,17 @@ static int run_audio_iteration(probe_session_t *session,
                 const ogg_opus_packet_t *packet = &input_opus->packets[input_packet_index];
                 packet_duration_samples = packet->duration_samples_48k;
                 packet_duration_ms = (int)(packet_duration_samples / 48U);
-                frame_ts_ms = base_ts_ms + (uint32_t)(input_timeline_samples / 48U);
                 payload = packet->data;
                 payload_len = (uint32_t)packet->len;
             } else {
                 packet_duration_ms = config->frame_ms;
                 packet_duration_samples = (uint32_t)packet_duration_ms * 48U;
-                frame_ts_ms = base_ts_ms +
-                    (frame_index - 1U) * (uint32_t)config->frame_ms;
                 payload = tone_payload;
                 payload_len = AUDIO_PAYLOAD_BYTES;
             }
-            if (session->audio.first_client_send_unix_ns == 0) {
-                session->audio.first_client_send_unix_ns = send_unix_ns;
+            outbound_packed_ts = pack_audio_timestamp(estimated_server_send_us, frame_index);
+            if (session->audio.first_client_send_unix_us == 0) {
+                session->audio.first_client_send_unix_us = send_unix_us;
             }
             if (send_late_us > session->audio.max_send_late_us) {
                 session->audio.max_send_late_us = send_late_us;
@@ -1793,9 +1733,14 @@ static int run_audio_iteration(probe_session_t *session,
             }
             if (audio_metrics_append(&session->audio,
                                      frame_index,
-                                     frame_ts_ms,
-                                     send_unix_ns,
+                                     frame_index,
+                                     (uint32_t)packet_duration_ms * 1000U,
+                                     outbound_packed_ts,
+                                     send_unix_us,
                                      send_mono_us,
+                                     estimated_server_send_us,
+                                     clock_offset_us,
+                                     time_sync_rtt_us,
                                      send_late_us) == NULL) {
                 pthread_mutex_unlock(&session->mutex);
                 log_message(stderr, "failed to record audio sample");
@@ -1814,7 +1759,7 @@ static int run_audio_iteration(probe_session_t *session,
             info.stream_id = AUDIO_STREAM_ID;
             info.media = input_opus == NULL ? TIRTC_AUDIO_PCM : TIRTC_AUDIO_OPUS;
             info.flags = input_opus == NULL ? TIRTC_AUDIOSAMPLE_8K16B1C : opus_audio_flags;
-            info.ts = frame_ts_ms;
+            info.ts = outbound_packed_ts;
             info.length = payload_len;
             payload_cpu_ns += thread_cpu_now_ns() - segment_cpu_start_ns;
 
@@ -1830,7 +1775,6 @@ static int run_audio_iteration(probe_session_t *session,
             }
             pthread_mutex_unlock(&session->mutex);
             next_send_us += (int64_t)packet_duration_samples * 1000000LL / 48000LL;
-            input_timeline_samples += packet_duration_samples;
             if (input_opus != NULL) {
                 input_packet_index++;
             }
@@ -1840,7 +1784,27 @@ static int run_audio_iteration(probe_session_t *session,
         }
     }
     loop_cpu_ns = thread_cpu_now_ns() - loop_cpu_start_ns;
-    sleep_for_us(1000000LL);
+    {
+        int64_t wait_started_us = monotonic_now_us();
+        for (;;) {
+            uint64_t echo_count;
+            int64_t last_echo_us;
+            int64_t now_us = monotonic_now_us();
+
+            pthread_mutex_lock(&session->mutex);
+            echo_count = session->audio.echo_count;
+            last_echo_us = session->audio.last_echo_recv_mono_us;
+            pthread_mutex_unlock(&session->mutex);
+            if (echo_count > 0 &&
+                now_us - last_echo_us >= AUDIO_ECHO_IDLE_GRACE_MS * 1000LL) {
+                break;
+            }
+            if (now_us - wait_started_us >= AUDIO_ECHO_WAIT_TIMEOUT_SEC * 1000000LL) {
+                break;
+            }
+            sleep_for_us(10000LL);
+        }
+    }
 
     pthread_mutex_lock(&session->mutex);
     if (session->echo_writer_open) {
@@ -1854,44 +1818,9 @@ static int run_audio_iteration(probe_session_t *session,
 
     pthread_mutex_lock(&session->mutex);
     session->audio.call_finished_mono_us = monotonic_now_us();
-    for (i = 0; i < session->audio.len; ++i) {
-        audio_sample_t *sample = &session->audio.items[i];
-        if (sample->observed) {
-            int64_t client_send_on_server_ns = sample->client_send_unix_ns + offset_ns;
-            (void)sample_set_push(&d2s_us, (sample->server_recv_unix_ns - client_send_on_server_ns) / 1000LL);
-        }
-        if (sample->echoed) {
-            (void)sample_set_push(&echo_us, sample->client_echo_recv_mono_us - sample->client_send_mono_us);
-        }
-        if (sample->observed && sample->echoed) {
-            int64_t echo_recv_unix_ns = sample->client_send_unix_ns +
-                                        (sample->client_echo_recv_mono_us - sample->client_send_mono_us) * 1000LL;
-            int64_t echo_recv_on_server_ns = echo_recv_unix_ns + offset_ns;
-            (void)sample_set_push(&s2d_us, (echo_recv_on_server_ns - sample->server_recv_unix_ns) / 1000LL);
-        }
-    }
-    if (session->audio.len > 0) {
-        audio_sample_t *first = &session->audio.items[0];
-        if (first->observed) {
-            int64_t client_send_on_server_ns = first->client_send_unix_ns + offset_ns;
-            first_d2s_value_us = (first->server_recv_unix_ns - client_send_on_server_ns) / 1000LL;
-            first_d2s_valid = 1;
-        }
-        if (first->echoed) {
-            first_echo_value_us = first->client_echo_recv_mono_us - first->client_send_mono_us;
-            first_echo_valid = 1;
-        }
-    }
-    write_audio_sample_log(sample_log, success_iteration, &session->audio, offset_ns);
-    printf("音频首包时间: 设备发送=%.6f 服务端收到(已换算到设备时钟)=%.6f 设备收到回声=%.6f\n",
-           ns_to_s(session->audio.first_client_send_unix_ns),
-           ns_to_s(session->audio.first_server_recv_unix_ns - offset_ns),
-           ns_to_s(session->audio.first_echo_recv_unix_ns));
-    printf("音频包统计: 设备发送=%" PRIu64 " 发送失败=%" PRIu64 " 服务端收到=%zu 设备收到回声=%" PRIu64 "\n",
-           session->audio.send_count,
-           session->audio.send_failed,
-           d2s_us.len,
-           session->audio.echo_count);
+    write_audio_sample_log(sample_log, success_iteration, &session->audio);
+    printf("音频原始事件: 设备发送=%" PRIu64 " 发送失败=%" PRIu64 " 设备收到回声=%" PRIu64 "\n",
+           session->audio.send_count, session->audio.send_failed, session->audio.echo_count);
     printf("音频发送调度: 最大延迟=%.2fms 超过一帧间隔次数=%" PRIu64 "\n",
            us_to_ms(session->audio.max_send_late_us),
            session->audio.late_send_count);
@@ -1908,107 +1837,23 @@ static int run_audio_iteration(probe_session_t *session,
                (double)post_send_cpu_ns / 1000000.0, (double)post_send_cpu_ns * 100.0 / total,
                (double)other_cpu_ns / 1000000.0, (double)other_cpu_ns * 100.0 / total);
     }
-    if (d2s_us.len != session->audio.len || session->audio.echo_count != session->audio.len) {
-        print_missing_audio_ranges("音频服务端未收到包序号", &session->audio, 1);
-        print_missing_audio_ranges("音频设备未收到回声包序号", &session->audio, 0);
-        print_missing_audio_details("音频服务端未收到包明细", &session->audio, 1);
-        print_missing_audio_details("音频设备未收到回声包明细", &session->audio, 0);
-    }
     *total_sent += session->audio.send_count;
     *total_send_failed += session->audio.send_failed;
-    *total_server_observed += (uint64_t)d2s_us.len;
     *total_echo_received += session->audio.echo_count;
-    {
-        int64_t call_us = session->audio.call_finished_mono_us - session->audio.call_started_mono_us;
-        double stutter_rate = call_us <= 0 ? 0.0 : (double)session->audio.stutter_time_us / (double)call_us;
-        iteration_stutter_count = session->audio.stutter_count;
-        iteration_stutter_time_us = session->audio.stutter_time_us;
-        iteration_stutter_rate_ppm = call_us <= 0 ? 0 : session->audio.stutter_time_us * 1000000LL / call_us;
-        printf("音频卡顿统计: 次数=%" PRIu64 " 累计时长=%.2fms 占比=%.2f%% 说明=相邻回声包间隔超过300ms计为卡顿\n",
-               session->audio.stutter_count,
-               us_to_ms(session->audio.stutter_time_us),
-               stutter_rate * 100.0);
-    }
     pthread_mutex_unlock(&session->mutex);
-
-    print_duration_summary_ms_cn("音频上行延迟(设备到服务端)", &d2s_us);
-    print_duration_summary_ms_cn("音频下行延迟(服务端到设备)", &s2d_us);
-    print_duration_summary_ms_cn("音频回声总延迟(设备发出到收到回声)", &echo_us);
-
-    if (first_d2s_valid) {
-        (void)sample_set_push(first_d2s_us, first_d2s_value_us);
-    }
-    if (first_echo_valid) {
-        (void)sample_set_push(first_echo_us, first_echo_value_us);
-    }
-    sample_set_append_all(all_d2s_us, &d2s_us);
-    sample_set_append_all(all_s2d_us, &s2d_us);
-    (void)sample_set_push(stutter_counts, (int64_t)iteration_stutter_count);
-    (void)sample_set_push(stutter_time_us, iteration_stutter_time_us);
-    (void)sample_set_push(stutter_rate_ppm, iteration_stutter_rate_ppm);
-    sample_set_free(&d2s_us);
-    sample_set_free(&echo_us);
-    sample_set_free(&s2d_us);
     return 0;
 }
 
 static void print_audio_cumulative_summary(int success,
                                            int target_success,
-                                           const sample_set_t *first_d2s_us,
-                                           const sample_set_t *first_echo_us,
-                                           const sample_set_t *all_d2s_us,
-                                           const sample_set_t *all_s2d_us,
-                                           const sample_set_t *stutter_counts,
-                                           const sample_set_t *stutter_time_us,
-                                           const sample_set_t *stutter_rate_ppm,
                                            uint64_t total_sent,
                                            uint64_t total_send_failed,
-                                           uint64_t total_server_observed,
                                            uint64_t total_echo_received)
 {
-    sample_set_t first_d2s_copy = {0};
-    sample_set_t first_echo_copy = {0};
-    sample_set_t all_d2s_copy = {0};
-    sample_set_t all_s2d_copy = {0};
-    sample_set_t stutter_counts_copy = {0};
-    sample_set_t stutter_time_copy = {0};
-    sample_set_t stutter_rate_copy = {0};
-    double server_observed_rate = total_sent == 0 ? 0.0 :
-        (double)total_server_observed * 100.0 / (double)total_sent;
-    double echo_received_rate = total_sent == 0 ? 0.0 :
-        (double)total_echo_received * 100.0 / (double)total_sent;
-
-    sample_set_append_all(&first_d2s_copy, first_d2s_us);
-    sample_set_append_all(&first_echo_copy, first_echo_us);
-    sample_set_append_all(&all_d2s_copy, all_d2s_us);
-    sample_set_append_all(&all_s2d_copy, all_s2d_us);
-    sample_set_append_all(&stutter_counts_copy, stutter_counts);
-    sample_set_append_all(&stutter_time_copy, stutter_time_us);
-    sample_set_append_all(&stutter_rate_copy, stutter_rate_ppm);
-
     printf("音频多轮汇总: 成功轮次=%d/%d\n", success, target_success);
-    printf("音频包数多轮汇总: 设备发送=%" PRIu64 " 发送失败=%" PRIu64 " 服务端收到=%" PRIu64 " 设备收到回声=%" PRIu64 " 服务端收包率=%.2f%% 回声收包率=%.2f%%\n",
-           total_sent,
-           total_send_failed,
-           total_server_observed,
-           total_echo_received,
-           server_observed_rate,
-           echo_received_rate);
-    print_duration_summary_ms_cn("音频首包上行延迟(设备到服务端)", &first_d2s_copy);
-    print_duration_summary_ms_cn("音频首包回声总延迟(设备发出到收到回声)", &first_echo_copy);
-    print_value_summary_cn("音频卡顿次数多轮汇总", &stutter_counts_copy);
-    print_duration_summary_ms_cn("音频卡顿时长多轮汇总", &stutter_time_copy);
-    print_percent_summary_cn("音频卡顿占比多轮汇总", &stutter_rate_copy);
-    print_duration_summary_ms_cn("音频上行延迟多轮汇总(设备到服务端)", &all_d2s_copy);
-    print_duration_summary_ms_cn("音频下行延迟多轮汇总(服务端到设备)", &all_s2d_copy);
-
-    sample_set_free(&first_d2s_copy);
-    sample_set_free(&first_echo_copy);
-    sample_set_free(&all_d2s_copy);
-    sample_set_free(&all_s2d_copy);
-    sample_set_free(&stutter_counts_copy);
-    sample_set_free(&stutter_time_copy);
-    sample_set_free(&stutter_rate_copy);
+    printf("音频原始事件多轮汇总: 设备发送=%" PRIu64 " 发送失败=%" PRIu64
+           " 设备收到回声=%" PRIu64 "，业务指标请使用CSV生成报告\n",
+           total_sent, total_send_failed, total_echo_received);
 }
 
 static int run_audio_command(const probe_config_t *config)
@@ -2018,16 +1863,9 @@ static int run_audio_command(const probe_config_t *config)
     time_sync_sample_t *sync_samples = NULL;
     size_t sync_count = 0;
     int64_t offset_ns = 0;
-    sample_set_t first_d2s_us = {0};
-    sample_set_t first_echo_us = {0};
-    sample_set_t all_d2s_us = {0};
-    sample_set_t all_s2d_us = {0};
-    sample_set_t stutter_counts = {0};
-    sample_set_t stutter_time_us = {0};
-    sample_set_t stutter_rate_ppm = {0};
+    int64_t time_sync_rtt_us = 0;
     uint64_t total_sent = 0;
     uint64_t total_send_failed = 0;
-    uint64_t total_server_observed = 0;
     uint64_t total_echo_received = 0;
     int success = 0;
     int attempts = 0;
@@ -2085,9 +1923,11 @@ static int run_audio_command(const probe_config_t *config)
             return 1;
         }
         fprintf(sample_log,
-                "iteration,send_index,frame_ts_ms,send_ret,send_late_us,observed,echoed,"
-                "client_send_unix_ns,server_recv_unix_ns,client_echo_recv_unix_ns,"
-                "uplink_us,downlink_us,echo_us,echo_arrival_gap_us,stutter,stutter_time_us\n");
+                "iteration,send_index,frame_index,frame_duration_us,send_ret,send_late_us,"
+                "client_send_unix_us,client_send_monotonic_us,estimated_server_send_unix_us,"
+                "clock_offset_us,time_sync_rtt_us,outbound_packed_ts,echo_received,echo_packed_ts,"
+                "server_receive_unix_us,client_echo_recv_unix_us,client_echo_recv_monotonic_us,"
+                "call_duration_us,timestamp_decode_status,duplicate_echo_count\n");
     }
 
     for (sync_connect_attempt = 1;
@@ -2139,6 +1979,15 @@ static int run_audio_command(const probe_config_t *config)
         return 1;
     }
     print_timesync_summary(sync_samples, sync_count, offset_ns);
+    if (sync_count > 0) {
+        size_t sync_index;
+        time_sync_rtt_us = sync_samples[0].rtt_us;
+        for (sync_index = 1; sync_index < sync_count; ++sync_index) {
+            if (sync_samples[sync_index].rtt_us < time_sync_rtt_us) {
+                time_sync_rtt_us = sync_samples[sync_index].rtt_us;
+            }
+        }
+    }
     free(sync_samples);
 
     while (success < config->audio_iterations && !g_should_exit) {
@@ -2152,19 +2001,12 @@ static int run_audio_command(const probe_config_t *config)
                                      config,
                                      input_opus_ptr,
                                      offset_ns,
+                                     time_sync_rtt_us,
                                      success + 1,
                                      config->audio_iterations,
                                      sample_log,
-                                     &first_d2s_us,
-                                     &first_echo_us,
-                                     &all_d2s_us,
-                                     &all_s2d_us,
-                                     &stutter_counts,
-                                     &stutter_time_us,
-                                     &stutter_rate_ppm,
                                      &total_sent,
                                      &total_send_failed,
-                                     &total_server_observed,
                                      &total_echo_received);
         } else {
             log_message(stderr, "connect failed: %s", TiRtcGetErrorStr(rc));
@@ -2175,16 +2017,8 @@ static int run_audio_command(const probe_config_t *config)
             success++;
             print_audio_cumulative_summary(success,
                                            config->audio_iterations,
-                                           &first_d2s_us,
-                                           &first_echo_us,
-                                           &all_d2s_us,
-                                           &all_s2d_us,
-                                           &stutter_counts,
-                                           &stutter_time_us,
-                                           &stutter_rate_ppm,
                                            total_sent,
                                            total_send_failed,
-                                           total_server_observed,
                                            total_echo_received);
         } else {
             log_message(stderr,
@@ -2195,13 +2029,6 @@ static int run_audio_command(const probe_config_t *config)
         }
     }
 
-    sample_set_free(&first_d2s_us);
-    sample_set_free(&first_echo_us);
-    sample_set_free(&all_d2s_us);
-    sample_set_free(&all_s2d_us);
-    sample_set_free(&stutter_counts);
-    sample_set_free(&stutter_time_us);
-    sample_set_free(&stutter_rate_ppm);
     if (sample_log != NULL) {
         fclose(sample_log);
     }

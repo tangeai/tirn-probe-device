@@ -25,7 +25,9 @@ timesync_timeout_ms=${TIMESYNC_TIMEOUT_MS:-3000}
 cpu_limit=${CPU_LIMIT:-0}
 direction=${NETEM_DIRECTION:-both}
 loss_profile=${LOSS_PROFILE:-legacy}
-case_timeout_sec=${CASE_TIMEOUT_SEC:-900}
+case_timeout_grace_sec=${CASE_TIMEOUT_GRACE_SEC:-300}
+audio_runtime_sec=$(((audio_iterations * duration_ms + 999) / 1000))
+case_timeout_sec=${CASE_TIMEOUT_SEC:-$((audio_runtime_sec + case_timeout_grace_sec))}
 case_filter=${CASE_FILTER:-}
 generate_only=${GENERATE_ONLY:-0}
 timestamp=$(date '+%Y%m%d_%H%M%S')
@@ -69,6 +71,8 @@ Defaults:
   PING_INTERVAL_SEC=0.1
   RESUME=0|1
   GENERATE_ONLY=0|1
+  CASE_TIMEOUT_SEC=<seconds> (default: audio runtime + CASE_TIMEOUT_GRACE_SEC)
+  CASE_TIMEOUT_GRACE_SEC=300
   REPORT_DIR=reports/netem_bidirectional_<timestamp>
   AUDIO_INPUT=/path/to/send_audio.opus
 USAGE
@@ -115,8 +119,8 @@ run_case() {
     legacy) uplink_loss=; downlink_loss= ;;
   esac
 
-  printf '[netem-report] command=%s delay=%sms loss=%s%% log=%s\n' \
-    "$command" "$delay_ms" "$loss" "$log_file"
+  printf '[netem-report] command=%s delay=%sms loss=%s%% watchdog=%ss log=%s\n' \
+    "$command" "$delay_ms" "$loss" "$case_timeout_sec" "$log_file"
   set +e
   PROBE_IMAGE="$image" \
   NETEM_NETWORK="$network_name" \
@@ -277,6 +281,7 @@ fi
   printf 'ping_interval_sec=%s\n' "$ping_interval_sec"
   printf 'connect_timeout_ms=%s\n' "$connect_timeout_ms"
   printf 'case_timeout_sec=%s\n' "$case_timeout_sec"
+  printf 'case_timeout_grace_sec=%s\n' "$case_timeout_grace_sec"
   printf 'case_filter=%s\n' "$case_filter"
 } >"$report_dir/environment.txt"
 
