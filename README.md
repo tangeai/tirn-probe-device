@@ -1,16 +1,7 @@
-# TiRTC 设备端送流 Demo
+# tirn-probe-device
 
-这是一个设备端本地媒体循环送流 Demo：启动后等待客户端连接，连接后循环发送 `assets/audio.g711a` 和 `assets/video.h264`。
-
-仓库已经预置默认媒体文件和 TiRTC SDK。正常情况下，克隆后不需要再下载 release 包或 SDK 包。
-
-## ESP32-S3 微信 VoIP 示例
-
-ESP32-S3 微信 IoT VoIP 设备端示例放在:
-
-- [`examples/wechat_voip_esp32s3`](examples/wechat_voip_esp32s3)
-
-该示例包含 Wi-Fi、时间同步、TiRTC 上线、业务 WebSocket、微信呼入、设备主动呼叫、接听、拒接、挂断和示例音频发送流程.
+`tirn-probe-device` 是用于诊断、探测 TiRTC WHIP 服务的设备端命令行程序。仓库只构建并输出该程序，
+不包含产品设备 Demo 或业务示例。
 
 ## 快速开始
 
@@ -23,15 +14,11 @@ ESP32-S3 微信 IoT VoIP 设备端示例放在:
 
 ```sh
 ./script/build.sh
-./script/run_demo.sh \
-  --device-id your_device_id \
-  --device-secret-key your_device_secret_key
+./build/macos-arm64/tirn-probe-device --help
 ```
 
 ## 预置内容
 
-- `assets/audio.g711a`
-- `assets/video.h264`
 - `3rd/macos-arm64/`
 - `3rd/linux-x86_64/`
 - `3rd/packages/`
@@ -44,24 +31,22 @@ ESP32-S3 微信 IoT VoIP 设备端示例放在:
 构建产物：
 
 ```text
-build/macos-arm64/device_uplink_demo
-build/macos-arm64/tirtc_accel_device_probe
+build/macos-arm64/tirn-probe-device
 build/macos-arm64/libTiRTC.dylib
 build/macos-arm64/libtgrtc.dylib
-build/linux-x86_64/device_uplink_demo
-build/linux-x86_64/tirtc_accel_device_probe
+build/linux-x86_64/tirn-probe-device
 ```
 
-## tirtc-accel 测试工具
+## WHIP 诊断能力
 
-`tirtc_accel_device_probe` 是面向 `tirtc-accel/whip-echo-svc` 的 WHIP 测试 device 工具。它主动调用
+`tirn-probe-device` 主动调用
 `TiRtcWhipConnect(peer_id, token, ...)`，因此需要业务侧提前提供 `whips://...` 形式的 `peer_id` 和连接
 `token`。如果 token 是一次性的，多次建连测试时由调用方保证 token 可用。
 
 ### 建连成功率和耗时
 
 ```sh
-./build/macos-arm64/tirtc_accel_device_probe connect \
+./build/macos-arm64/tirn-probe-device connect \
   --endpoint https://your-access.example.com \
   --device-id your_device_id \
   --device-secret-key your_device_secret_key \
@@ -79,7 +64,7 @@ build/linux-x86_64/tirtc_accel_device_probe
 可使用 `Ctrl-C` 提前结束并统一断开连接。
 
 ```sh
-./build/linux-x86_64/tirtc_accel_device_probe idle \
+./build/linux-x86_64/tirn-probe-device idle \
   --endpoint https://your-access.example.com \
   --device-id your_device_id \
   --device-secret-key your_device_secret_key \
@@ -103,14 +88,14 @@ docker run --ulimit core=-1 --ulimit nofile=65535:65535 ...
 
 core 文件的实际位置仍由宿主机 `kernel.core_pattern` 决定。
 
-`script/run_accel_probe_idle_1000.sh` 会将总连接数拆成多个同时运行的 probe 进程，避免单个进程在约 300 多个
+`script/run_tirn_probe_idle_1000.sh` 会将总连接数拆成多个同时运行的 probe 进程，避免单个进程在约 300 多个
 连接时触发资源或缓冲区限制。默认每个进程最多建立 300 个连接：
 
 ```sh
 CONNECTIONS=1000 \
 CONNECTIONS_PER_PROCESS=300 \
 DURATION_MS=600000 \
-./script/run_accel_probe_idle_1000.sh
+./script/run_tirn_probe_idle_1000.sh
 ```
 
 以上配置会同时运行 4 个 worker，连接数分别为 300、300、300、100。每个 worker 使用独立容器和日志；脚本
@@ -122,10 +107,10 @@ TGWebRTC 的 `[RTC_THREAD_STAT]` 是底层通过 `printf` 直接输出的耗时�
 
 ```sh
 # 保留全部
-RTC_THREAD_STAT_SAMPLE_EVERY=1 ./script/run_accel_probe_idle_1000.sh
+RTC_THREAD_STAT_SAMPLE_EVERY=1 ./script/run_tirn_probe_idle_1000.sh
 
 # 每 100 条保留 1 条
-RTC_THREAD_STAT_SAMPLE_EVERY=100 ./script/run_accel_probe_idle_1000.sh
+RTC_THREAD_STAT_SAMPLE_EVERY=100 ./script/run_tirn_probe_idle_1000.sh
 ```
 
 `RTC_THREAD_STAT_SAMPLE_EVERY=0` 表示全部过滤，也是默认值。每个 worker 结束时会输出被过滤的总行数。
@@ -133,7 +118,7 @@ RTC_THREAD_STAT_SAMPLE_EVERY=100 ./script/run_accel_probe_idle_1000.sh
 ### 设备对时和设备到服务端延迟估算
 
 ```sh
-./build/macos-arm64/tirtc_accel_device_probe timesync \
+./build/macos-arm64/tirn-probe-device timesync \
   --endpoint https://your-access.example.com \
   --device-id your_device_id \
   --device-secret-key your_device_secret_key \
@@ -149,7 +134,7 @@ RTC_THREAD_STAT_SAMPLE_EVERY=100 ./script/run_accel_probe_idle_1000.sh
 ### 音频质量测试
 
 ```sh
-./build/macos-arm64/tirtc_accel_device_probe audio \
+./build/macos-arm64/tirn-probe-device audio \
   --endpoint https://your-access.example.com \
   --device-id your_device_id \
   --device-secret-key your_device_secret_key \
@@ -176,7 +161,7 @@ Probe 使用发送时间到回声接收时间组成的窗口并向两端各放�
 可以用 Ogg Opus 文件代替内置测试音发送，并保存服务端 echo 回来的音频：
 
 ```sh
-./build/macos-arm64/tirtc_accel_device_probe audio \
+./build/macos-arm64/tirn-probe-device audio \
   --endpoint https://your-access.example.com \
   --device-id your_device_id \
   --device-secret-key your_device_secret_key \
@@ -191,17 +176,26 @@ Probe 使用发送时间到回声接收时间组成的窗口并向两端各放�
 并按照回包到达时间补入 20ms Opus 静音帧，因此播放器或转码后的 WAV 都会保留网络停顿。多轮测试时输出文件名
 自动增加 `.iteration-N`。
 
+Probe runner 镜像内置同一份语音素材的 8 kHz 和 16 kHz 单声道版本，均使用 20ms Opus 帧：
+
+```text
+/opt/tirtc-probe-tests/audio/send_audio_8k.opus
+/opt/tirtc-probe-tests/audio/send_audio_16k.opus
+```
+
+对应环境变量为 `TIRTC_PROBE_AUDIO_8K` 和 `TIRTC_PROBE_AUDIO_16K`；自动化音频测试默认选用 16 kHz 版本。
+
 ### TiRTC 日志等级
 
-两个示例程序均支持 `--log-level <level>`。等级 `1`~`5` 分别对应
+程序支持 `--log-level <level>`。等级 `1`~`5` 分别对应
 error/warn/ok/info/verbose；`11`~`100` 会额外开启 WebRTC 底层日志，输出量较大且可能影响性能。
-`device_uplink_demo` 默认等级为 `4`，`tirtc_accel_device_probe` 默认等级为 `3`。
+默认等级为 `3`。
 
 ## 脚本说明
 
 ### `./script/build.sh`
 
-按当前 native 平台编译 Demo。
+按当前 native 平台编译 `tirn-probe-device`。
 
 ```sh
 ./script/build.sh
@@ -211,23 +205,11 @@ error/warn/ok/info/verbose；`11`~`100` 会额外开启 WebRTC 底层日志，�
 
 `--platform` 必须和当前宿主平台一致；脚本不做交叉编译。
 
-### `./script/run_demo.sh`
-
-运行当前平台的 Demo。
-
-```sh
-./script/run_demo.sh \
-  --device-id your_device_id \
-  --device-secret-key your_device_secret_key
-```
-
-运行前请先执行 `./script/build.sh`。
-
 ## 更新或替换 SDK
 
 ### Probe runner 镜像的 TiRTC SDK
 
-`script/build_accel_probe_runner_image.sh` 构建镜像时会从制品库下载并分别编译两个 Linux SDK 版本：
+`script/build_tirn_probe_runner_image.sh` 构建镜像时会从制品库下载并分别编译两个 Linux SDK 版本：
 
 - `tgmp-linux-standard`
 - `tgmp-linux-desktop-standard`
@@ -236,12 +218,12 @@ error/warn/ok/info/verbose；`11`~`100` 会额外开启 WebRTC 底层日志，�
 
 ```sh
 docker run --rm IMAGE \
-  tirtc_accel_device_probe --tirtc-sdk desktop idle ...
+  tirn-probe-device --tirtc-sdk desktop idle ...
 
 docker run --rm \
   -e TIRTC_SDK_VARIANT=standard \
   IMAGE \
-  tirtc_accel_device_probe connect ...
+  tirn-probe-device connect ...
 ```
 
 允许值为 `standard`、`desktop`，也接受完整名称。为保证 idle 多连接测试条件一致，`idle` 显式选择 standard
@@ -252,8 +234,8 @@ docker run --rm \
 ```sh
 TIRTC_STANDARD_SDK_URL=https://.../standard.tgz \
 TIRTC_DESKTOP_SDK_URL=https://.../desktop-standard.tgz \
-PROBE_IMAGE=tirtc-accel-probe-runner:test \
-./script/build_accel_probe_runner_image.sh
+PROBE_IMAGE=tirn-probe-device-runner:test \
+./script/build_tirn_probe_runner_image.sh
 ```
 
 SDK 包浏览地址：
@@ -278,16 +260,4 @@ mkdir -p 3rd/linux-x86_64
 tar -xzf "$linux_sdk_tgz" \
   -C 3rd/linux-x86_64 \
   --strip-components 1
-```
-
-## macOS 上自选 Docker 跑 Linux Demo
-
-需要在 macOS 上临时跑 Linux x86_64 版时：
-
-```sh
-docker run --rm --platform linux/amd64 \
-  -v "$PWD":/work \
-  -w /work \
-  ubuntu:22.04 \
-  bash -lc 'apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates make && ./script/build.sh && ./script/run_demo.sh --device-id your_device_id --device-secret-key your_device_secret_key'
 ```

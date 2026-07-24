@@ -6,14 +6,14 @@ repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
-    printf '[demo] missing required command: %s\n' "$1" >&2
+    printf '[tirn-probe-device] missing required command: %s\n' "$1" >&2
     exit 1
   fi
 }
 
 require_file() {
   if [ ! -f "$1" ]; then
-    printf '[demo] missing required file: %s\n' "$1" >&2
+    printf '[tirn-probe-device] missing required file: %s\n' "$1" >&2
     exit 1
   fi
 }
@@ -39,7 +39,7 @@ print_usage() {
   cat <<'USAGE'
 Usage: ./script/build.sh [--platform macos-arm64|linux-x86_64]
 
-Builds the demo and accel probe tools for the current native host platform.
+Builds tirn-probe-device for the current native host platform.
 Cross compilation is not supported by this script.
 USAGE
 }
@@ -59,7 +59,7 @@ validate_sdk() {
       ;;
     linux-x86_64) ;;
     *)
-      printf '[demo] unsupported platform: %s\n' "$platform" >&2
+      printf '[tirn-probe-device] unsupported platform: %s\n' "$platform" >&2
       exit 1
       ;;
   esac
@@ -91,7 +91,7 @@ platform=$host_platform
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --platform)
-      [ "$#" -ge 2 ] || { printf '[demo] --platform requires a value\n' >&2; exit 1; }
+      [ "$#" -ge 2 ] || { printf '[tirn-probe-device] --platform requires a value\n' >&2; exit 1; }
       platform=$2
       shift 2
       ;;
@@ -100,29 +100,29 @@ while [ "$#" -gt 0 ]; do
       exit 0
       ;;
     *)
-      printf '[demo] unknown argument: %s\n' "$1" >&2
+      printf '[tirn-probe-device] unknown argument: %s\n' "$1" >&2
       exit 1
       ;;
   esac
 done
 
 if [ -z "$host_platform" ]; then
-  printf '[demo] unsupported host: %s %s\n' "$(uname -s)" "$(uname -m)" >&2
-  printf '%s\n' '[demo] supported native hosts: macOS arm64, Linux x86_64' >&2
+  printf '[tirn-probe-device] unsupported host: %s %s\n' "$(uname -s)" "$(uname -m)" >&2
+  printf '%s\n' '[tirn-probe-device] supported native hosts: macOS arm64, Linux x86_64' >&2
   exit 1
 fi
 
 case "$platform" in
   macos-arm64|linux-x86_64) ;;
   *)
-    printf '[demo] unsupported platform: %s\n' "$platform" >&2
+    printf '[tirn-probe-device] unsupported platform: %s\n' "$platform" >&2
     exit 1
     ;;
 esac
 
 if [ "$platform" != "$host_platform" ]; then
-  printf '[demo] requested platform %s does not match native host %s\n' "$platform" "$host_platform" >&2
-  printf '%s\n' '[demo] use a matching host or run the Linux command in README from your own container.' >&2
+  printf '[tirn-probe-device] requested platform %s does not match native host %s\n' "$platform" "$host_platform" >&2
+  printf '%s\n' '[tirn-probe-device] use a matching native host.' >&2
   exit 1
 fi
 
@@ -130,14 +130,13 @@ require_command make
 require_file "$repo_root/Makefile"
 
 if ! sdk_complete "$platform"; then
-  printf '[demo] SDK for %s is incomplete.\n' "$platform" >&2
-  printf '%s\n' '[demo] restore 3rd/<platform> from the vendored package or download a replacement SDK as described in README.md.' >&2
+  printf '[tirn-probe-device] SDK for %s is incomplete.\n' "$platform" >&2
+  printf '%s\n' '[tirn-probe-device] restore 3rd/<platform> from the vendored package or download a replacement SDK as described in README.md.' >&2
   validate_sdk "$platform"
 fi
 
-printf '[demo] building device_uplink_demo and tirtc_accel_device_probe for %s\n' "$platform"
+printf '[tirn-probe-device] building for %s\n' "$platform"
 cd "$repo_root"
 make PLATFORM="$platform" clean-platform
 make PLATFORM="$platform"
-printf '[demo] build output: %s\n' "$repo_root/build/$platform/device_uplink_demo"
-printf '[demo] build output: %s\n' "$repo_root/build/$platform/tirtc_accel_device_probe"
+printf '[tirn-probe-device] build output: %s\n' "$repo_root/build/$platform/tirn-probe-device"

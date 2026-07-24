@@ -13,7 +13,7 @@ if [ -f "$script_dir/.env" ]; then
   set +a
 fi
 
-image=${PROBE_IMAGE:-docker-hub.tange365.com/runtime/tirtc-accel-probe-runner:test}
+image=${PROBE_IMAGE:-docker-hub.tange365.com/runtime/tirn-probe-device-runner:test}
 state_dir=${STATE_DIR:-$repo_root/reports/.probe-image-audio-monitor}
 last_image_file=$state_dir/last-tested-connect-audio-image-id
 lock_dir=$state_dir/lock
@@ -154,9 +154,9 @@ prepare_image_assets() {
   else
     log "using cached scripts and audio for image $asset_id from $asset_root"
   fi
-  for required_script in run_accel_probe_netem_report.sh \
-      run_accel_probe_with_netem_gateway.sh run_accel_probe_case.py \
-      generate_accel_probe_netem_report.py; do
+  for required_script in run_tirn_probe_netem_report.sh \
+      run_tirn_probe_with_netem_gateway.sh run_tirn_probe_case.py \
+      generate_tirn_probe_netem_report.py; do
     [ -f "$support_script_dir/$required_script" ] ||
       fail "image is missing support script: $required_script"
   done
@@ -285,7 +285,7 @@ run_one_case() {
   AUDIO_INPUT="$audio_input" \
   CASE_FILTER="$case_filter" \
   REPORT_DIR="$case_report_dir" \
-    "$support_script_dir/run_accel_probe_netem_report.sh"
+    "$support_script_dir/run_tirn_probe_netem_report.sh"
 }
 
 wait_batch() {
@@ -351,7 +351,7 @@ merge_case_reports() {
     printf 'loss_profile=%s\n' "$loss_profile"
     printf 'parallel_jobs=%s\n' "$parallel_jobs"
   } >>"$report_dir/environment.txt"
-  python3 "$support_script_dir/generate_accel_probe_netem_report.py" \
+  python3 "$support_script_dir/generate_tirn_probe_netem_report.py" \
     --report-dir "$report_dir" --output "$report_dir/report.md"
 }
 

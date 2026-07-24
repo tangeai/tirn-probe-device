@@ -23,11 +23,11 @@ fi
 case "$requested" in
   standard|tgmp-linux-standard)
     variant=tgmp-linux-standard
-    binary=/usr/local/libexec/tirtc_accel_device_probe-standard
+    binary=/usr/local/libexec/tirn-probe-device-standard
     ;;
   desktop|tgmp-linux-desktop-standard)
     variant=tgmp-linux-desktop-standard
-    binary=/usr/local/libexec/tirtc_accel_device_probe-desktop
+    binary=/usr/local/libexec/tirn-probe-device-desktop
     export LD_LIBRARY_PATH="/opt/tirtc/desktop/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     ;;
   *)
