@@ -25,12 +25,14 @@
 
 #include "tiRTC.h"
 #include "ogg_opus.h"
+#include "media_sample.h"
 
 enum {
     CMD_TIME_SYNC_REQUEST = 0x2010,
     CMD_TIME_SYNC_RESPONSE = 0x2011,
 
     AUDIO_STREAM_ID = 0,
+    VIDEO_STREAM_ID = 1,
     AUDIO_SAMPLE_RATE_HZ = 8000,
     AUDIO_BYTES_PER_SAMPLE = 2,
     AUDIO_PAYLOAD_BYTES = 640,
@@ -72,6 +74,7 @@ typedef enum {
     COMMAND_CONNECT,
     COMMAND_IDLE,
     COMMAND_TIMESYNC,
+    COMMAND_MEDIA,
     COMMAND_AUDIO,
 } probe_command_t;
 
@@ -163,6 +166,9 @@ typedef struct {
     int disconnected;
     int conn_error;
     int idle_only;
+    int media_mode;
+    uint64_t media_audio_received;
+    uint64_t media_video_received;
     int64_t connect_started_us;
     int64_t connect_cost_us;
     uint32_t waiting_timesync_seq;
@@ -185,6 +191,7 @@ typedef enum {
     CALLBACK_EVENT_DISCONNECTED,
     CALLBACK_EVENT_COMMAND,
     CALLBACK_EVENT_AUDIO,
+    CALLBACK_EVENT_VIDEO,
 } callback_event_type_t;
 
 typedef struct callback_event {
@@ -807,6 +814,12 @@ static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *d
     if (session->idle_only) {
         return;
     }
+    if (session->media_mode) {
+        pthread_mutex_lock(&session->mutex);
+        session->media_audio_received++;
+        pthread_mutex_unlock(&session->mutex);
+        return;
+    }
     frame_index = unpack_audio_frame_index(info->ts);
 
     now_mono_us = monotonic_now_us();
@@ -900,6 +913,18 @@ static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *d
     pthread_mutex_unlock(&session->mutex);
 }
 
+static void handle_video(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info)
+{
+    probe_session_t *session = active_session_for_conn(hconn);
+
+    if (session == NULL || info == NULL || !session->media_mode) {
+        return;
+    }
+    pthread_mutex_lock(&session->mutex);
+    session->media_video_received++;
+    pthread_mutex_unlock(&session->mutex);
+}
+
 static void *callback_worker_main(void *arg)
 {
     (void)arg;
@@ -934,6 +959,9 @@ static void *callback_worker_main(void *arg)
                 break;
             case CALLBACK_EVENT_AUDIO:
                 handle_audio(event.hconn, &event.frame_info, event.data);
+                break;
+            case CALLBACK_EVENT_VIDEO:
+                handle_video(event.hconn, &event.frame_info);
                 break;
         }
     }
@@ -1065,11 +1093,27 @@ static void on_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *data)
     (void)enqueue_callback_event(&event);
 }
 
+static void on_video(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *data)
+{
+    callback_event_t event;
+
+    if (info == NULL || data == NULL || info->length == 0) {
+        atomic_fetch_add_explicit(&g_app.callback_events_dropped, 1, memory_order_relaxed);
+        return;
+    }
+    memset(&event, 0, sizeof(event));
+    event.type = CALLBACK_EVENT_VIDEO;
+    event.hconn = hconn;
+    event.frame_info = *info;
+    (void)enqueue_callback_event(&event);
+}
+
 static const TIRTCCALLBACKS g_callbacks = {
     .on_event = on_event,
     .on_conn_error = on_conn_error,
     .on_disconnected = on_disconnected,
     .on_audio = on_audio,
+    .on_video = on_video,
     .on_command = on_command,
 };
 
@@ -1845,6 +1889,93 @@ static void print_audio_cumulative_summary(int success,
            total_sent, total_send_failed, total_echo_received);
 }
 
+static int run_media_command(const probe_config_t *config)
+{
+    probe_session_t session;
+    uint64_t audio_sent = 0;
+    uint64_t video_sent = 0;
+    uint64_t audio_received;
+    uint64_t video_received;
+    uint32_t audio_index = 0;
+    int64_t started_us;
+    int64_t next_audio_us;
+    int64_t next_video_us;
+    int rc;
+
+    session_init(&session);
+    session.media_mode = 1;
+    rc = connect_session(config, &session);
+    if (rc != 0) {
+        log_message(stderr, "media connection failed: rc=%d error=%s",
+                    rc, TiRtcGetErrorStr(rc));
+        disconnect_session(&session);
+        session_destroy(&session);
+        return 1;
+    }
+
+    printf("媒体测试源: 音频=内置 440 Hz PCM，视频=内置 JPEG 测试帧\n");
+    started_us = monotonic_now_us();
+    next_audio_us = started_us;
+    next_video_us = started_us;
+    while (!g_should_exit &&
+           monotonic_now_us() - started_us < config->duration_sec * 1000000LL) {
+        int64_t now_us = monotonic_now_us();
+
+        if (now_us >= next_audio_us) {
+            uint8_t payload[AUDIO_PAYLOAD_BYTES];
+            TIRTCFRAMEINFO info;
+
+            audio_index++;
+            make_audio_payload(payload, audio_index);
+            memset(&info, 0, sizeof(info));
+            info.stream_id = AUDIO_STREAM_ID;
+            info.media = TIRTC_AUDIO_PCM;
+            info.flags = TIRTC_AUDIOSAMPLE_8K16B1C;
+            info.ts = (uint32_t)(now_us / 1000LL);
+            info.length = sizeof(payload);
+            if (TiRtcSendAudioStream(session.hconn, &info, payload) >= 0) {
+                audio_sent++;
+            }
+            next_audio_us += DEFAULT_FRAME_MS * 1000LL;
+        }
+        if (now_us >= next_video_us) {
+            TIRTCFRAMEINFO info;
+
+            memset(&info, 0, sizeof(info));
+            info.stream_id = VIDEO_STREAM_ID;
+            info.media = TIRTC_VIDEO_JPEG;
+            info.flags = TIRTC_FRAME_FLAG_KEY_FRAME;
+            info.ts = (uint32_t)(now_us / 1000LL);
+            info.length = sizeof(kMediaSampleJpeg);
+            if (TiRtcSendVideoStream(session.hconn, &info, kMediaSampleJpeg) >= 0) {
+                video_sent++;
+            }
+            next_video_us += 1000000LL;
+        }
+        sleep_for_us(1000LL);
+    }
+
+    /* Allow the final media frames to arrive before closing the connection. */
+    sleep_for_us(500000LL);
+    pthread_mutex_lock(&session.mutex);
+    audio_received = session.media_audio_received;
+    video_received = session.media_video_received;
+    pthread_mutex_unlock(&session.mutex);
+    disconnect_session(&session);
+    session_destroy(&session);
+
+    printf("媒体联调结果: 音频发送=%" PRIu64 " 接收=%" PRIu64
+           "，视频发送=%" PRIu64 " 接收=%" PRIu64 "\n",
+           audio_sent, audio_received, video_sent, video_received);
+    if (audio_sent == 0 || video_sent == 0 ||
+        audio_received == 0 || video_received == 0) {
+        log_message(stderr, "media validation failed: expected sent and received audio/video");
+        return 1;
+    }
+    printf("媒体联调通过\n");
+    return 0;
+}
+
 static int run_audio_command(const probe_config_t *config)
 {
     probe_session_t sync_session;
@@ -2032,11 +2163,17 @@ static void print_usage(const char *program)
             "  %s connect  --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--iterations <n>] [--connect-timeout-ms <ms>] [--start-retries <n>] [--log-level <1-5|11+>]\n"
             "  %s idle     --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> --connections <n> [--duration-sec <seconds>] [--interval-ms <ms>] [--connect-timeout-ms <ms>] [--log-level <1-5|11+>]\n"
             "  %s timesync --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--repeat <n>] [--interval-ms <ms>] [--timeout-ms <ms>] [--log-level <1-5|11+>]\n"
+            "  %s media    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--duration-sec <seconds>] [--connect-timeout-ms <ms>] [--log-level <1-5|11+>]\n"
             "  %s audio    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--audio-input <ogg-opus-path> --audio-echo-output <ogg-opus-path>] [--audio-iterations <n>] [--duration-sec <seconds>] [--frame-ms <ms>] [--repeat <n>] [--start-retries <n>] [--audio-sample-log <csv-path>] [--log-level <1-5|11+>]\n",
             program,
             program,
             program,
+            program,
             program);
+    fprintf(stderr,
+            "\nConnection values may also be supplied with TIRTC_ENDPOINT, "
+            "TIRTC_DEVICE_ID,\nTIRTC_DEVICE_SECRET_KEY, TIRTC_PEER_ID, and "
+            "TIRTC_TOKEN. Command-line values take precedence.\n");
 }
 
 static int parse_int_value(const char *name, const char *value, int min_value, int max_value, int *out)
@@ -2095,6 +2232,8 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
         config->command = COMMAND_IDLE;
     } else if (strcmp(argv[1], "timesync") == 0) {
         config->command = COMMAND_TIMESYNC;
+    } else if (strcmp(argv[1], "media") == 0) {
+        config->command = COMMAND_MEDIA;
     } else if (strcmp(argv[1], "audio") == 0) {
         config->command = COMMAND_AUDIO;
     } else if (strcmp(argv[1], "--help") == 0) {
@@ -2199,6 +2338,22 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
         }
         log_message(stderr, "unknown argument: %s", arg);
         return -1;
+    }
+
+    if (config->endpoint == NULL) {
+        config->endpoint = getenv("TIRTC_ENDPOINT");
+    }
+    if (config->device_id == NULL) {
+        config->device_id = getenv("TIRTC_DEVICE_ID");
+    }
+    if (config->device_secret_key == NULL) {
+        config->device_secret_key = getenv("TIRTC_DEVICE_SECRET_KEY");
+    }
+    if (config->peer_id == NULL) {
+        config->peer_id = getenv("TIRTC_PEER_ID");
+    }
+    if (config->token == NULL) {
+        config->token = getenv("TIRTC_TOKEN");
     }
 
     if (config->endpoint == NULL || config->endpoint[0] == '\0' ||
@@ -2410,7 +2565,7 @@ int main(int argc, char **argv)
 
     log_message(stdout, "TiRTC version: %s", TiRtcGetVersion());
     if (config.command == COMMAND_CONNECT || config.command == COMMAND_IDLE ||
-        config.command == COMMAND_AUDIO) {
+        config.command == COMMAND_MEDIA || config.command == COMMAND_AUDIO) {
         rc = sdk_start_with_retry(&config);
     } else {
         rc = sdk_start(&config);
@@ -2429,6 +2584,9 @@ int main(int argc, char **argv)
         break;
     case COMMAND_TIMESYNC:
         rc = run_timesync_command(&config);
+        break;
+    case COMMAND_MEDIA:
+        rc = run_media_command(&config);
         break;
     case COMMAND_AUDIO:
         rc = run_audio_command(&config);

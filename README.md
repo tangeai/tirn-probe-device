@@ -1,263 +1,180 @@
-# tirn-probe-device
+# tirn_probe_device
 
-`tirn-probe-device` 是用于诊断、探测 TiRTC WHIP 服务的设备端命令行程序。仓库只构建并输出该程序，
-不包含产品设备 Demo 或业务示例。
+`tirn_probe_device` 是用于联调、诊断 TiRTC WHIP 服务的设备端命令行程序。它支持建连、
+并发空闲连接、时钟同步、音视频链路验证和音频弱网诊断。
 
-## 快速开始
+仓库只包含可审阅的探测程序源码和通用构建入口，不捆绑 TiRTC SDK、内部测试凭据、
+内部镜像、测试报告或飞书发布工具。
 
-平台要求：
+## 支持平台
 
-| 平台 | 要求 |
-| --- | --- |
-| macOS arm64 | Xcode Command Line Tools、`make` |
-| Linux x86_64 | glibc 2.35 或更高版本、GCC/Make 工具链，例如 Ubuntu 上的 `build-essential` |
+| 平台 | 编译环境 | TiRTC SDK |
+| --- | --- | --- |
+| macOS arm64 | Xcode Command Line Tools、Make | macOS arm64 SDK |
+| Linux x86_64 | GCC、glibc、Make | Linux x86_64 SDK |
+
+当前构建是 native build，不支持交叉编译。其他 CPU 架构和操作系统尚未验证。
+
+## 准备 TiRTC SDK
+
+从 TiRTC SDK 的正式分发渠道获取与你的平台兼容、且允许你使用的 SDK。解压后的目录结构应为：
+
+```text
+<sdk-dir>/
+├── include/tirtc/basedef.h
+├── include/tirtc/tiRTC.h
+└── lib/
+```
+
+macOS SDK 的 `lib/` 需包含 `libTiRTC.dylib` 和 `libtgrtc.dylib`；Linux SDK 需包含
+`libTiRTC.a`。
+
+SDK 默认放在 `third_party/tirtc/<platform>`，该目录被 Git 忽略。也可以在构建时选择任意目录：
+
+```sh
+./script/build.sh --sdk-dir /absolute/path/to/tirtc-sdk
+```
+
+或：
+
+```sh
+TIRTC_SDK_DIR=/absolute/path/to/tirtc-sdk ./script/build.sh
+```
+
+## 构建
 
 ```sh
 ./script/build.sh
-./build/macos-arm64/tirn-probe-device --help
 ```
 
-## 预置内容
-
-- `3rd/macos-arm64/`
-- `3rd/linux-x86_64/`
-- `3rd/packages/`
-
-`script/build.sh` 会按当前宿主平台自动选择：
-
-- macOS arm64 -> `3rd/macos-arm64`
-- Linux x86_64 -> `3rd/linux-x86_64`
-
-构建产物：
-
-```text
-build/macos-arm64/tirn-probe-device
-build/macos-arm64/libTiRTC.dylib
-build/macos-arm64/libtgrtc.dylib
-build/linux-x86_64/tirn-probe-device
-```
-
-## WHIP 诊断能力
-
-`tirn-probe-device` 主动调用
-`TiRtcWhipConnect(peer_id, token, ...)`，因此需要业务侧提前提供 `whips://...` 形式的 `peer_id` 和连接
-`token`。如果 token 是一次性的，多次建连测试时由调用方保证 token 可用。
-
-### 建连成功率和耗时
+也可以直接使用 Make：
 
 ```sh
-./build/macos-arm64/tirn-probe-device connect \
+make TIRTC_SDK_DIR=/absolute/path/to/tirtc-sdk
+```
+
+主要构建产物：
+
+```text
+build/macos-arm64/tirn_probe_device
+build/linux-x86_64/tirn_probe_device
+```
+
+为了兼容旧命令，构建目录同时创建 `tirn-probe-device` 符号链接。macOS 构建会把运行所需的
+TiRTC 动态库复制到可执行文件旁边。
+
+## 使用
+
+所有命令都需要 TiRTC 接入地址、设备凭据，以及业务侧签发的 WHIP `peer_id` 和 `token`。
+不要把真实凭据写进代码、脚本或提交到 Git。命令行中的密钥可能被 shell history 或进程列表记录；
+实际使用建议通过环境变量提供连接参数：
+
+```sh
+export TIRTC_ENDPOINT=https://your-access.example.com
+export TIRTC_DEVICE_ID=your_device_id
+export TIRTC_DEVICE_SECRET_KEY=your_device_secret_key
+export TIRTC_PEER_ID='whips://your-service?device_id=your_device_id'
+export TIRTC_TOKEN=your_connect_token
+./build/macos-arm64/tirn_probe_device connect
+```
+
+命令行参数优先于同名环境变量。执行结束后可使用 `unset` 清理敏感变量；在共享机器上还应遵循操作系统的
+进程环境和凭据管理策略。
+
+```sh
+./build/macos-arm64/tirn_probe_device --help
+```
+
+### 音视频快速联调
+
+`media` 发送内置 440 Hz PCM 音频和内置 1×1 JPEG 测试帧，并统计服务端返回的音视频帧。
+四项计数均大于零时测试通过，不需要摄像头、麦克风或外部媒体文件。
+
+```sh
+./build/macos-arm64/tirn_probe_device media \
   --endpoint https://your-access.example.com \
   --device-id your_device_id \
   --device-secret-key your_device_secret_key \
-  --peer-id 'whips://whip-echo-svc?device_id=your_device_id' \
+  --peer-id 'whips://your-service?device_id=your_device_id' \
+  --token your_connect_token \
+  --duration-sec 10
+```
+
+### 建连诊断
+
+```sh
+./build/macos-arm64/tirn_probe_device connect \
+  --endpoint https://your-access.example.com \
+  --device-id your_device_id \
+  --device-secret-key your_device_secret_key \
+  --peer-id 'whips://your-service?device_id=your_device_id' \
   --token your_connect_token \
   --iterations 10
 ```
 
-输出包含建连成功率，以及成功建连耗时的 p50/p90/p95/p99。
+输出建连成功率和成功建连耗时的 p50/p90/p95/p99。
 
-### 并发空闲连接压测
-
-`idle` 模式会逐个建立指定数量的 TiRTC 连接并同时保持，不主动发送命令、音频或视频业务数据，适合测试
-服务端并发连接容量。`--interval-ms` 控制相邻连接的启动间隔，达到目标连接数后按 `--duration-sec` 保持；
-可使用 `Ctrl-C` 提前结束并统一断开连接。
+### 并发空闲连接
 
 ```sh
-./build/linux-x86_64/tirn-probe-device idle \
+./build/linux-x86_64/tirn_probe_device idle \
   --endpoint https://your-access.example.com \
   --device-id your_device_id \
   --device-secret-key your_device_secret_key \
-  --peer-id 'whips://whip-echo-svc?device_id=your_device_id' \
+  --peer-id 'whips://your-service?device_id=your_device_id' \
   --token your_connect_token \
-  --connections 1000 \
+  --connections 100 \
   --interval-ms 10 \
-  --duration-sec 600
+  --duration-sec 60
 ```
 
-输出包含成功建立数、峰值并发数、保持结束时的存活连接数、异常断连数及建连耗时分位值。目标服务所用
-token 必须允许重复建连；同时注意单个进程的文件描述符限制应高于目标连接数。
+`idle` 不主动发送业务数据。请确保进程文件描述符上限高于目标连接数，并确认测试服务允许相同凭据并发建连。
 
-`idle` 模式会在 `TiRtcInit()` 前将 `TIRTC_OPT_MAX_CONNECTIONS` 设置为 `--connections`，确保 SDK 按目标
-并发量规划连接资源。probe runner 镜像启动时会尝试启用 unlimited core dump；Docker hard limit 不允许时会
-输出告警。需要可靠保留崩溃 core 时应显式运行：
+### 时钟同步
 
 ```sh
-docker run --ulimit core=-1 --ulimit nofile=65535:65535 ...
-```
-
-core 文件的实际位置仍由宿主机 `kernel.core_pattern` 决定。
-
-`script/run_tirn_probe_idle_1000.sh` 会将总连接数拆成多个同时运行的 probe 进程，避免单个进程在约 300 多个
-连接时触发资源或缓冲区限制。默认每个进程最多建立 300 个连接：
-
-```sh
-CONNECTIONS=1000 \
-CONNECTIONS_PER_PROCESS=300 \
-DURATION_MS=600000 \
-./script/run_tirn_probe_idle_1000.sh
-```
-
-以上配置会同时运行 4 个 worker，连接数分别为 300、300、300、100。每个 worker 使用独立容器和日志；脚本
-也可被多次同时启动，运行 ID 中包含时间与进程号，不会互相覆盖容器名或日志。按 `Ctrl-C` 会清理本次启动的
-所有 worker 容器。
-
-TGWebRTC 的 `[RTC_THREAD_STAT]` 是底层通过 `printf` 直接输出的耗时诊断信息，不受 `LOG_LEVEL` 控制。
-脚本默认过滤这些日志。需要保留全部或抽样保留时，可设置：
-
-```sh
-# 保留全部
-RTC_THREAD_STAT_SAMPLE_EVERY=1 ./script/run_tirn_probe_idle_1000.sh
-
-# 每 100 条保留 1 条
-RTC_THREAD_STAT_SAMPLE_EVERY=100 ./script/run_tirn_probe_idle_1000.sh
-```
-
-`RTC_THREAD_STAT_SAMPLE_EVERY=0` 表示全部过滤，也是默认值。每个 worker 结束时会输出被过滤的总行数。
-
-### 设备对时和设备到服务端延迟估算
-
-```sh
-./build/macos-arm64/tirn-probe-device timesync \
+./build/macos-arm64/tirn_probe_device timesync \
   --endpoint https://your-access.example.com \
   --device-id your_device_id \
   --device-secret-key your_device_secret_key \
-  --peer-id 'whips://whip-echo-svc?device_id=your_device_id' \
+  --peer-id 'whips://your-service?device_id=your_device_id' \
   --token your_connect_token \
-  --repeat 20 \
-  --interval-ms 100
+  --repeat 20
 ```
 
-工具会重复发送对时命令，由服务端返回收到命令时的服务端 UnixNano。设备端记录发送/收到响应的本地时间，
-估算设备时钟到服务端时钟的 offset，并输出 RTT、offset、设备到服务端延迟估算的 p50/p90/p95/p99。
+此命令需要目标服务实现本工具约定的对时命令响应。
 
-### 音频质量测试
+### 音频诊断
 
 ```sh
-./build/macos-arm64/tirn-probe-device audio \
+./build/macos-arm64/tirn_probe_device audio \
   --endpoint https://your-access.example.com \
   --device-id your_device_id \
   --device-secret-key your_device_secret_key \
-  --peer-id 'whips://whip-echo-svc?device_id=your_device_id' \
+  --peer-id 'whips://your-service?device_id=your_device_id' \
   --token your_connect_token \
   --duration-sec 10 \
-  --frame-ms 40 \
   --audio-sample-log /tmp/audio-samples.csv
 ```
 
-音频测试开始前会先执行对时。测试帧将 `frame_info.ts` 解释为私有的 `20-bit time + 12-bit frame_index`
-格式：高 20 位是 Unix 微秒时间除以 100 后的低 20 位，低 12 位是帧号。Probe 发送时编码换算到服务端
-时钟域的预计发送时间；`whip-echo-svc` 回声时保留帧号并将高 20 位替换为服务端实际接收时间。时间字段
-每 104.8576 秒回绕，20ms 帧的帧号每 81.92 秒回绕，因此回声 RTT 必须小于 81.92 秒。
+`audio` 可使用内置测试音，也支持 `--audio-input <ogg-opus-path>` 和
+`--audio-echo-output <ogg-opus-path>`。单向延迟和音频回声指标依赖目标服务实现本工具约定的
+时间戳与回声行为；它们不是通用 WHIP 标准能力。
 
-Probe 使用发送时间到回声接收时间组成的窗口并向两端各放宽 2000ms，枚举相邻时间周期。只有唯一候选
-才恢复服务端绝对接收时间；无候选、多个候选、负单向延迟、帧号歧义、重复包和未知包均保留诊断状态，
-不会猜测或生成错误的单向延迟。建议最大单向延迟 30 秒，回声排空最长等待 75 秒。
+## 便携性边界
 
-`--audio-sample-log` 可选。未指定或传入空字符串时不创建文件；指定路径时写入逐包原始 CSV，包含轮次、
-帧序号、帧时长、发送/回声 packed ts、微秒时间、单调时钟、对时结果及解码状态。Probe 不计算音频质量
-指标；上下行延迟、端到端延迟、帧间隔、回声率和卡顿均由报告生成工具从 CSV 计算。
+- 源码使用 C11、POSIX 线程和 POSIX 时间/信号 API。
+- 当前只为 macOS arm64 和 Linux x86_64 提供构建规则。
+- TiRTC SDK 是外部必需依赖，其 ABI、系统库和再分发条款由 SDK 包决定。
+- Linux 当前静态链接 `libTiRTC.a`，还依赖 `pthread`、`m` 和 `dl`。
+- macOS 当前动态链接 TiRTC，并通过 `@executable_path` 查找随程序复制的动态库。
+- `timesync`、`media` 的下行验证和 `audio` 的详细指标要求服务端支持相应诊断协议。
 
-可以用 Ogg Opus 文件代替内置测试音发送，并保存服务端 echo 回来的音频：
+## 开源发布前
 
-```sh
-./build/macos-arm64/tirn-probe-device audio \
-  --endpoint https://your-access.example.com \
-  --device-id your_device_id \
-  --device-secret-key your_device_secret_key \
-  --peer-id 'whips://whip-echo-svc?device_id=your_device_id' \
-  --token your_connect_token \
-  --audio-input ~/Downloads/send_audio.opus \
-  --audio-echo-output /tmp/received_echo.opus
-```
+本仓库目前没有开源许可证。仓库所有者必须在公开发布前选择并加入 `LICENSE`，同时确认：
 
-`--audio-input` 接受标准 Ogg Opus 文件，按照文件内每个 Opus packet 的原始帧时长发送。不指定
-`--duration-sec` 时发送完整文件；指定后以该时长为上限。`--audio-echo-output` 保存实际收到的 Opus echo，
-并按照回包到达时间补入 20ms Opus 静音帧，因此播放器或转码后的 WAV 都会保留网络停顿。多轮测试时输出文件名
-自动增加 `.iteration-N`。
-
-Probe runner 镜像内置同一份语音素材的 8 kHz 和 16 kHz 单声道版本，均使用 20ms Opus 帧：
-
-```text
-/opt/tirtc-probe-tests/audio/send_audio_8k.opus
-/opt/tirtc-probe-tests/audio/send_audio_16k.opus
-```
-
-对应环境变量为 `TIRTC_PROBE_AUDIO_8K` 和 `TIRTC_PROBE_AUDIO_16K`；自动化音频测试默认选用 16 kHz 版本。
-
-### TiRTC 日志等级
-
-程序支持 `--log-level <level>`。等级 `1`~`5` 分别对应
-error/warn/ok/info/verbose；`11`~`100` 会额外开启 WebRTC 底层日志，输出量较大且可能影响性能。
-默认等级为 `3`。
-
-## 脚本说明
-
-### `./script/build.sh`
-
-按当前 native 平台编译 `tirn-probe-device`。
-
-```sh
-./script/build.sh
-./script/build.sh --platform macos-arm64
-./script/build.sh --platform linux-x86_64
-```
-
-`--platform` 必须和当前宿主平台一致；脚本不做交叉编译。
-
-## 更新或替换 SDK
-
-### Probe runner 镜像的 TiRTC SDK
-
-`script/build_tirn_probe_runner_image.sh` 构建镜像时会从制品库下载并分别编译两个 Linux SDK 版本：
-
-- `tgmp-linux-standard`
-- `tgmp-linux-desktop-standard`
-
-镜像运行时默认规则：`idle` 命令使用 desktop，其余命令使用 standard。也可以通过环境变量或启动参数显式选择：
-
-```sh
-docker run --rm IMAGE \
-  tirn-probe-device --tirtc-sdk desktop idle ...
-
-docker run --rm \
-  -e TIRTC_SDK_VARIANT=standard \
-  IMAGE \
-  tirn-probe-device connect ...
-```
-
-允许值为 `standard`、`desktop`，也接受完整名称。为保证 idle 多连接测试条件一致，`idle` 显式选择 standard
-会直接报错退出。probe 启动后会打印实际 SDK variant、下载地址和 `TiRtcGetVersion()`。
-
-可以在构建时覆盖 SDK 下载链接：
-
-```sh
-TIRTC_STANDARD_SDK_URL=https://.../standard.tgz \
-TIRTC_DESKTOP_SDK_URL=https://.../desktop-standard.tgz \
-PROBE_IMAGE=tirn-probe-device-runner:test \
-./script/build_tirn_probe_runner_image.sh
-```
-
-SDK 包浏览地址：
-
-- macOS arm64: https://repo-sdk.tange-ai.com/service/rest/repository/browse/tirtc-sdks/releases/macos-arm64/
-- Linux x86_64: https://repo-sdk.tange-ai.com/service/rest/repository/browse/tirtc-sdks/releases/linux-x86_64/
-
-下载目标平台的 SDK 包后，解包到工程约定目录：
-
-```sh
-macos_sdk_tgz=3rd/packages/your-macos-sdk.tgz
-linux_sdk_tgz=3rd/packages/your-linux-sdk.tgz
-
-rm -rf 3rd/macos-arm64
-mkdir -p 3rd/macos-arm64
-tar -xzf "$macos_sdk_tgz" \
-  -C 3rd/macos-arm64 \
-  --strip-components 1
-
-rm -rf 3rd/linux-x86_64
-mkdir -p 3rd/linux-x86_64
-tar -xzf "$linux_sdk_tgz" \
-  -C 3rd/linux-x86_64 \
-  --strip-components 1
-```
+- TiRTC SDK 只作为外部依赖使用，不进入公开 Git 历史；
+- SDK 头文件是否允许复制到派生项目，由其自身授权条款决定；
+- 仓库历史中不存在曾提交的 SDK 二进制、内部地址、凭据或测试数据；
+- GitHub 的 secret scanning 和依赖安全检查已启用。

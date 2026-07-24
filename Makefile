@@ -22,14 +22,15 @@ ifeq (,$(filter $(PLATFORM),$(SUPPORTED_PLATFORMS)))
 endif
 
 BUILD_DIR := build
-TARGET := $(BUILD_DIR)/$(PLATFORM)/tirn-probe-device
+TARGET := $(BUILD_DIR)/$(PLATFORM)/tirn_probe_device
+COMPAT_TARGET := $(BUILD_DIR)/$(PLATFORM)/tirn-probe-device
 OBJ_DIR := $(BUILD_DIR)/$(PLATFORM)/obj
 SRC_DIR := src
-TIRTC_SDK_DIR ?= 3rd/$(PLATFORM)
+TIRTC_SDK_DIR ?= third_party/tirtc/$(PLATFORM)
 TIRTC_INCLUDE_DIR := $(TIRTC_SDK_DIR)/include/tirtc
 TIRTC_LIB_DIR := $(TIRTC_SDK_DIR)/lib
-TIRTC_SDK_VARIANT ?= vendored-$(PLATFORM)
-TIRTC_SDK_SOURCE_URL ?= vendored
+TIRTC_SDK_VARIANT ?= external-$(PLATFORM)
+TIRTC_SDK_SOURCE_URL ?= external
 
 SRCS := \
 	$(SRC_DIR)/tirn_probe_device.c \
@@ -55,7 +56,7 @@ endif
 
 .PHONY: all clean clean-platform print-platform
 
-all: $(TARGET)
+all: $(TARGET) $(COMPAT_TARGET)
 
 $(TARGET): $(OBJS) $(TIRTC_LIBS)
 	@mkdir -p $(dir $@)
@@ -63,6 +64,9 @@ $(TARGET): $(OBJS) $(TIRTC_LIBS)
 ifneq ($(strip $(TIRTC_RUNTIME_LIBS)),)
 	cp $(TIRTC_RUNTIME_LIBS) $(dir $@)
 endif
+
+$(COMPAT_TARGET): $(TARGET)
+	ln -sf $(notdir $(TARGET)) $@
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)

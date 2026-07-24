@@ -1,4 +1,9 @@
 build/
 .build/
 libwebrtc.log
-reports/*.log
+.DS_Store
+.env
+third_party/tirtc/
+reports/
+*.tar
+*.tar.gz

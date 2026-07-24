@@ -37,27 +37,30 @@ detect_platform() {
 
 print_usage() {
   cat <<'USAGE'
-Usage: ./script/build.sh [--platform macos-arm64|linux-x86_64]
+Usage: ./script/build.sh [--platform macos-arm64|linux-x86_64] [--sdk-dir <path>]
 
 Builds tirn-probe-device for the current native host platform.
 Cross compilation is not supported by this script.
+The SDK defaults to third_party/tirtc/<platform>. It can also be selected with
+--sdk-dir or the TIRTC_SDK_DIR environment variable.
 USAGE
 }
 
 validate_sdk() {
   platform=$1
-  sdk_dir="$repo_root/3rd/$platform"
+  sdk_dir=$2
 
   require_file "$sdk_dir/include/tirtc/tiRTC.h"
   require_file "$sdk_dir/include/tirtc/basedef.h"
-  require_file "$sdk_dir/lib/libTiRTC.a"
 
   case "$platform" in
     macos-arm64)
       require_file "$sdk_dir/lib/libTiRTC.dylib"
       require_file "$sdk_dir/lib/libtgrtc.dylib"
       ;;
-    linux-x86_64) ;;
+    linux-x86_64)
+      require_file "$sdk_dir/lib/libTiRTC.a"
+      ;;
     *)
       printf '[tirn-probe-device] unsupported platform: %s\n' "$platform" >&2
       exit 1
@@ -67,18 +70,19 @@ validate_sdk() {
 
 sdk_complete() {
   platform=$1
-  sdk_dir="$repo_root/3rd/$platform"
+  sdk_dir=$2
 
   [ -f "$sdk_dir/include/tirtc/tiRTC.h" ] || return 1
   [ -f "$sdk_dir/include/tirtc/basedef.h" ] || return 1
-  [ -f "$sdk_dir/lib/libTiRTC.a" ] || return 1
 
   case "$platform" in
     macos-arm64)
       [ -f "$sdk_dir/lib/libTiRTC.dylib" ] || return 1
       [ -f "$sdk_dir/lib/libtgrtc.dylib" ] || return 1
       ;;
-    linux-x86_64) ;;
+    linux-x86_64)
+      [ -f "$sdk_dir/lib/libTiRTC.a" ] || return 1
+      ;;
     *)
       return 1
       ;;
@@ -87,12 +91,18 @@ sdk_complete() {
 
 host_platform=$(detect_platform || true)
 platform=$host_platform
+sdk_dir=${TIRTC_SDK_DIR:-}
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --platform)
       [ "$#" -ge 2 ] || { printf '[tirn-probe-device] --platform requires a value\n' >&2; exit 1; }
       platform=$2
+      shift 2
+      ;;
+    --sdk-dir)
+      [ "$#" -ge 2 ] || { printf '[tirn-probe-device] --sdk-dir requires a value\n' >&2; exit 1; }
+      sdk_dir=$2
       shift 2
       ;;
     --help)
@@ -129,14 +139,21 @@ fi
 require_command make
 require_file "$repo_root/Makefile"
 
-if ! sdk_complete "$platform"; then
+if [ -z "$sdk_dir" ]; then
+  sdk_dir="$repo_root/third_party/tirtc/$platform"
+elif [ "${sdk_dir#/}" = "$sdk_dir" ]; then
+  sdk_dir="$repo_root/$sdk_dir"
+fi
+
+if ! sdk_complete "$platform" "$sdk_dir"; then
   printf '[tirn-probe-device] SDK for %s is incomplete.\n' "$platform" >&2
-  printf '%s\n' '[tirn-probe-device] restore 3rd/<platform> from the vendored package or download a replacement SDK as described in README.md.' >&2
-  validate_sdk "$platform"
+  printf '[tirn-probe-device] checked SDK directory: %s\n' "$sdk_dir" >&2
+  printf '%s\n' '[tirn-probe-device] install a compatible TiRTC SDK or pass --sdk-dir; see README.md.' >&2
+  validate_sdk "$platform" "$sdk_dir"
 fi
 
 printf '[tirn-probe-device] building for %s\n' "$platform"
 cd "$repo_root"
-make PLATFORM="$platform" clean-platform
-make PLATFORM="$platform"
-printf '[tirn-probe-device] build output: %s\n' "$repo_root/build/$platform/tirn-probe-device"
+make PLATFORM="$platform" TIRTC_SDK_DIR="$sdk_dir" clean-platform
+make PLATFORM="$platform" TIRTC_SDK_DIR="$sdk_dir"
+printf '[tirn-probe-device] build output: %s\n' "$repo_root/build/$platform/tirn_probe_device"
