@@ -27,8 +27,8 @@
 #include "ogg_opus.h"
 
 enum {
-    CMD_TIME_SYNC_REQUEST = 0x2003,
-    CMD_TIME_SYNC_RESPONSE = 0x2004,
+    CMD_TIME_SYNC_REQUEST = 0x2010,
+    CMD_TIME_SYNC_RESPONSE = 0x2011,
 
     AUDIO_STREAM_ID = 0,
     AUDIO_SAMPLE_RATE_HZ = 8000,
@@ -634,13 +634,6 @@ static void audio_metrics_reset_iteration(audio_metrics_t *metrics)
     metrics->cap = cap;
 }
 
-static int is_latency_probe_payload(const void *data, uint32_t len)
-{
-    static const uint8_t magic[] = {'T', 'I', 'R', 'T', 'C', 'E', 'C', 'H'};
-
-    return len >= sizeof(magic) && memcmp(data, magic, sizeof(magic)) == 0;
-}
-
 static void signal_handler(int signo)
 {
     (void)signo;
@@ -812,10 +805,6 @@ static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *d
         return;
     }
     if (session->idle_only) {
-        return;
-    }
-    if (is_latency_probe_payload(data, info->length)) {
-        (void)TiRtcSendAudioStream(hconn, info, data);
         return;
     }
     frame_index = unpack_audio_frame_index(info->ts);
