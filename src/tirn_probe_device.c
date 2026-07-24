@@ -97,6 +97,7 @@ typedef struct {
     int start_retries;
     int log_level;
     int json_output;
+    int client_mode;
     const char *audio_sample_log;
     const char *audio_input;
     const char *audio_echo_output;
@@ -2160,11 +2161,11 @@ static void print_usage(const char *program)
 {
     fprintf(stderr,
             "Usage:\n"
-            "  %s connect  --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--iterations <n>] [--connect-timeout-ms <ms>] [--start-retries <n>] [--log-level <1-5|11+>]\n"
-            "  %s idle     --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> --connections <n> [--duration-sec <seconds>] [--interval-ms <ms>] [--connect-timeout-ms <ms>] [--log-level <1-5|11+>]\n"
-            "  %s timesync --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--repeat <n>] [--interval-ms <ms>] [--timeout-ms <ms>] [--log-level <1-5|11+>]\n"
-            "  %s media    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--duration-sec <seconds>] [--connect-timeout-ms <ms>] [--log-level <1-5|11+>]\n"
-            "  %s audio    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--audio-input <ogg-opus-path> --audio-echo-output <ogg-opus-path>] [--audio-iterations <n>] [--duration-sec <seconds>] [--frame-ms <ms>] [--repeat <n>] [--start-retries <n>] [--audio-sample-log <csv-path>] [--log-level <1-5|11+>]\n",
+            "  %s connect  --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--client-mode] [--iterations <n>] [--connect-timeout-ms <ms>] [--start-retries <n>] [--log-level <1-5|11+>]\n"
+            "  %s idle     --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> --connections <n> [--client-mode] [--duration-sec <seconds>] [--interval-ms <ms>] [--connect-timeout-ms <ms>] [--log-level <1-5|11+>]\n"
+            "  %s timesync --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--client-mode] [--repeat <n>] [--interval-ms <ms>] [--timeout-ms <ms>] [--log-level <1-5|11+>]\n"
+            "  %s media    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--client-mode] [--duration-sec <seconds>] [--connect-timeout-ms <ms>] [--log-level <1-5|11+>]\n"
+            "  %s audio    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--client-mode] [--audio-input <ogg-opus-path> --audio-echo-output <ogg-opus-path>] [--audio-iterations <n>] [--duration-sec <seconds>] [--frame-ms <ms>] [--repeat <n>] [--start-retries <n>] [--audio-sample-log <csv-path>] [--log-level <1-5|11+>]\n",
             program,
             program,
             program,
@@ -2333,6 +2334,11 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
             i++;
             continue;
         }
+        if (strcmp(arg, "--client-mode") == 0) {
+            config->client_mode = 1;
+            i++;
+            continue;
+        }
         if (strcmp(arg, "--help") == 0) {
             return 1;
         }
@@ -2361,7 +2367,8 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
         config->device_secret_key == NULL || config->device_secret_key[0] == '\0' ||
         config->peer_id == NULL || config->peer_id[0] == '\0' ||
         config->token == NULL || config->token[0] == '\0') {
-        log_message(stderr, "missing required endpoint/device/peer/token argument");
+        log_message(stderr,
+                    "missing required endpoint/device-id/device-secret-key/peer-id/token argument");
         return -1;
     }
     if (config->command != COMMAND_AUDIO &&
@@ -2444,7 +2451,9 @@ static int sdk_start(const probe_config_t *config)
         return -1;
     }
 
-    rc = TiRtcStart(config->device_id, &g_callbacks);
+    log_message(stdout, "TiRTC start mode: %s",
+                config->client_mode ? "client" : "device");
+    rc = TiRtcStart(config->client_mode ? NULL : config->device_id, &g_callbacks);
     if (rc != 0) {
         callback_worker_stop();
         TiRtcUninit();

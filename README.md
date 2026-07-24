@@ -84,6 +84,27 @@ export TIRTC_TOKEN=your_connect_token
 ./build/macos-arm64/tirn_probe_device --help
 ```
 
+### Client mode 与本地 mock
+
+传入 `--client-mode` 时，程序使用 `TiRtcStart(NULL, ...)` 启动，不向 endpoint 请求 `/v1/start`，
+但仍然强制要求 `device-id` 和 `device-secret-key`，并把 secret key 和由 device ID 生成的 client ID
+设置进 SDK。随后 `TiRtcWhipConnect()` 仍会向 endpoint 请求 `/v1/connect`。
+
+该模式适合用本地 access mock 返回 WHIP endpoint，从而不依赖真实 `tirtc-access-svc`：
+
+```sh
+./build/macos-arm64/tirn_probe_device connect \
+  --client-mode \
+  --endpoint http://127.0.0.1:8765 \
+  --device-id local_probe \
+  --device-secret-key local_secret \
+  --peer-id local_whip_echo \
+  --token mock_token
+```
+
+本地仍需提供 `/v1/connect` mock 和能够处理 offer/answer 的 WHIP 服务。`--client-mode` 只跳过
+设备注册阶段的 `/v1/start`，不会绕过 `/v1/connect` 或 WHIP 建连。
+
 ### 音视频快速联调
 
 `media` 发送内置 440 Hz PCM 音频和内置 1×1 JPEG 测试帧，并统计服务端返回的音视频帧。
