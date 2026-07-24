@@ -3,8 +3,7 @@
 `tirn_probe_device` 是用于联调、诊断 TiRTC WHIP 服务的设备端命令行程序。它支持建连、
 并发空闲连接、时钟同步、音视频链路验证和音频弱网诊断。
 
-仓库只包含可审阅的探测程序源码和通用构建入口，不捆绑 TiRTC SDK、内部测试凭据、
-内部镜像、测试报告或飞书发布工具。
+仓库包含探测程序源码和通用构建入口，不捆绑 TiRTC SDK。构建前需从正式分发渠道获取与你的平台匹配的 SDK。
 
 ## 支持平台
 
@@ -73,7 +72,7 @@ TiRTC 动态库复制到可执行文件旁边。
 export TIRTC_ENDPOINT=https://your-access.example.com
 export TIRTC_DEVICE_ID=your_device_id
 export TIRTC_DEVICE_SECRET_KEY=your_device_secret_key
-export TIRTC_PEER_ID='whips://your-service?device_id=your_device_id'
+export TIRTC_PEER_ID='whips://your-service?_tg_mode=echo'
 export TIRTC_TOKEN=your_connect_token
 ./build/macos-arm64/tirn_probe_device connect
 ```
@@ -95,7 +94,7 @@ export TIRTC_TOKEN=your_connect_token
   --endpoint https://your-access.example.com \
   --device-id your_device_id \
   --device-secret-key your_device_secret_key \
-  --peer-id 'whips://your-service?device_id=your_device_id' \
+  --peer-id 'whips://your-service?_tg_mode=echo' \
   --token your_connect_token \
   --duration-sec 10
 ```
@@ -107,7 +106,7 @@ export TIRTC_TOKEN=your_connect_token
   --endpoint https://your-access.example.com \
   --device-id your_device_id \
   --device-secret-key your_device_secret_key \
-  --peer-id 'whips://your-service?device_id=your_device_id' \
+  --peer-id 'whips://your-service?_tg_mode=echo' \
   --token your_connect_token \
   --iterations 10
 ```
@@ -121,7 +120,7 @@ export TIRTC_TOKEN=your_connect_token
   --endpoint https://your-access.example.com \
   --device-id your_device_id \
   --device-secret-key your_device_secret_key \
-  --peer-id 'whips://your-service?device_id=your_device_id' \
+  --peer-id 'whips://your-service?_tg_mode=echo' \
   --token your_connect_token \
   --connections 100 \
   --interval-ms 10 \
@@ -137,7 +136,7 @@ export TIRTC_TOKEN=your_connect_token
   --endpoint https://your-access.example.com \
   --device-id your_device_id \
   --device-secret-key your_device_secret_key \
-  --peer-id 'whips://your-service?device_id=your_device_id' \
+  --peer-id 'whips://your-service?_tg_mode=echo' \
   --token your_connect_token \
   --repeat 20
 ```
@@ -151,7 +150,7 @@ export TIRTC_TOKEN=your_connect_token
   --endpoint https://your-access.example.com \
   --device-id your_device_id \
   --device-secret-key your_device_secret_key \
-  --peer-id 'whips://your-service?device_id=your_device_id' \
+  --peer-id 'whips://your-service?_tg_mode=echo' \
   --token your_connect_token \
   --duration-sec 10 \
   --audio-sample-log /tmp/audio-samples.csv
@@ -169,12 +168,3 @@ export TIRTC_TOKEN=your_connect_token
 - Linux 当前静态链接 `libTiRTC.a`，还依赖 `pthread`、`m` 和 `dl`。
 - macOS 当前动态链接 TiRTC，并通过 `@executable_path` 查找随程序复制的动态库。
 - `timesync`、`media` 的下行验证和 `audio` 的详细指标要求服务端支持相应诊断协议。
-
-## 开源发布前
-
-本仓库目前没有开源许可证。仓库所有者必须在公开发布前选择并加入 `LICENSE`，同时确认：
-
-- TiRTC SDK 只作为外部依赖使用，不进入公开 Git 历史；
-- SDK 头文件是否允许复制到派生项目，由其自身授权条款决定；
-- 仓库历史中不存在曾提交的 SDK 二进制、内部地址、凭据或测试数据；
-- GitHub 的 secret scanning 和依赖安全检查已启用。
