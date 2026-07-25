@@ -101,6 +101,7 @@ typedef struct {
     const char *audio_sample_log;
     const char *audio_input;
     const char *audio_echo_output;
+    const char *audio_output;
     int duration_explicit;
 } probe_config_t;
 
@@ -170,6 +171,9 @@ typedef struct {
     int media_mode;
     uint64_t media_audio_received;
     uint64_t media_video_received;
+    FILE *media_audio_output;
+    uint64_t media_audio_output_bytes;
+    int media_audio_output_error;
     int64_t connect_started_us;
     int64_t connect_cost_us;
     uint32_t waiting_timesync_seq;
@@ -818,6 +822,20 @@ static void handle_audio(tirtc_conn_t hconn, const TIRTCFRAMEINFO *info, void *d
     if (session->media_mode) {
         pthread_mutex_lock(&session->mutex);
         session->media_audio_received++;
+        if (session->media_audio_output != NULL && !session->media_audio_output_error) {
+            if (info->media != TIRTC_AUDIO_PCM) {
+                log_message(stderr,
+                            "cannot save media audio: expected PCM, received media=%u",
+                            (unsigned int)info->media);
+                session->media_audio_output_error = 1;
+            } else if (fwrite(data, 1, info->length, session->media_audio_output) !=
+                       info->length) {
+                log_message(stderr, "failed to write media audio output");
+                session->media_audio_output_error = 1;
+            } else {
+                session->media_audio_output_bytes += info->length;
+            }
+        }
         pthread_mutex_unlock(&session->mutex);
         return;
     }
@@ -1893,10 +1911,13 @@ static void print_audio_cumulative_summary(int success,
 static int run_media_command(const probe_config_t *config)
 {
     probe_session_t session;
+    FILE *audio_output = NULL;
     uint64_t audio_sent = 0;
     uint64_t video_sent = 0;
     uint64_t audio_received;
     uint64_t video_received;
+    uint64_t audio_output_bytes;
+    int audio_output_error;
     uint32_t audio_index = 0;
     int64_t started_us;
     int64_t next_audio_us;
@@ -1905,11 +1926,26 @@ static int run_media_command(const probe_config_t *config)
 
     session_init(&session);
     session.media_mode = 1;
+    if (config->audio_output != NULL) {
+        audio_output = fopen(config->audio_output, "wb");
+        if (audio_output == NULL) {
+            log_message(stderr,
+                        "failed to open audio output %s: %s",
+                        config->audio_output,
+                        strerror(errno));
+            session_destroy(&session);
+            return 1;
+        }
+        session.media_audio_output = audio_output;
+    }
     rc = connect_session(config, &session);
     if (rc != 0) {
         log_message(stderr, "media connection failed: rc=%d error=%s",
                     rc, TiRtcGetErrorStr(rc));
         disconnect_session(&session);
+        if (audio_output != NULL) {
+            fclose(audio_output);
+        }
         session_destroy(&session);
         return 1;
     }
@@ -1958,18 +1994,32 @@ static int run_media_command(const probe_config_t *config)
 
     /* Allow the final media frames to arrive before closing the connection. */
     sleep_for_us(500000LL);
+    disconnect_session(&session);
     pthread_mutex_lock(&session.mutex);
     audio_received = session.media_audio_received;
     video_received = session.media_video_received;
+    audio_output_bytes = session.media_audio_output_bytes;
+    audio_output_error = session.media_audio_output_error;
     pthread_mutex_unlock(&session.mutex);
-    disconnect_session(&session);
+    if (audio_output != NULL && fclose(audio_output) != 0) {
+        log_message(stderr,
+                    "failed to close audio output %s: %s",
+                    config->audio_output,
+                    strerror(errno));
+        audio_output_error = 1;
+    }
     session_destroy(&session);
 
     printf("媒体联调结果: 音频发送=%" PRIu64 " 接收=%" PRIu64
            "，视频发送=%" PRIu64 " 接收=%" PRIu64 "\n",
            audio_sent, audio_received, video_sent, video_received);
+    if (config->audio_output != NULL) {
+        printf("接收音频已保存: %s，格式=PCM 8kHz/16bit/单声道，字节=%" PRIu64 "\n",
+               config->audio_output,
+               audio_output_bytes);
+    }
     if (audio_sent == 0 || video_sent == 0 ||
-        audio_received == 0 || video_received == 0) {
+        audio_received == 0 || video_received == 0 || audio_output_error) {
         log_message(stderr, "media validation failed: expected sent and received audio/video");
         return 1;
     }
@@ -2164,7 +2214,7 @@ static void print_usage(const char *program)
             "  %s connect  --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--client-mode] [--iterations <n>] [--connect-timeout-ms <ms>] [--start-retries <n>] [--log-level <1-5|11+>]\n"
             "  %s idle     --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> --connections <n> [--client-mode] [--duration-sec <seconds>] [--interval-ms <ms>] [--connect-timeout-ms <ms>] [--log-level <1-5|11+>]\n"
             "  %s timesync --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--client-mode] [--repeat <n>] [--interval-ms <ms>] [--timeout-ms <ms>] [--log-level <1-5|11+>]\n"
-            "  %s media    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--client-mode] [--duration-sec <seconds>] [--connect-timeout-ms <ms>] [--log-level <1-5|11+>]\n"
+            "  %s media    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--client-mode] [--audio-output <pcm-path>] [--duration-sec <seconds>] [--connect-timeout-ms <ms>] [--log-level <1-5|11+>]\n"
             "  %s audio    --endpoint <url> --device-id <id> --device-secret-key <key> --peer-id <whips://...> --token <token> [--client-mode] [--audio-input <ogg-opus-path> --audio-echo-output <ogg-opus-path>] [--audio-iterations <n>] [--duration-sec <seconds>] [--frame-ms <ms>] [--repeat <n>] [--start-retries <n>] [--audio-sample-log <csv-path>] [--log-level <1-5|11+>]\n",
             program,
             program,
@@ -2263,6 +2313,7 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
             strcmp(arg, "--audio-sample-log") == 0 ||
             strcmp(arg, "--audio-input") == 0 ||
             strcmp(arg, "--audio-echo-output") == 0 ||
+            strcmp(arg, "--audio-output") == 0 ||
             strcmp(arg, "--start-retries") == 0 ||
             strcmp(arg, "--log-level") == 0 ||
             strcmp(arg, "--frame-ms") == 0) {
@@ -2312,6 +2363,8 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
                 config->audio_input = argv[i + 1];
             } else if (strcmp(arg, "--audio-echo-output") == 0) {
                 config->audio_echo_output = argv[i + 1];
+            } else if (strcmp(arg, "--audio-output") == 0) {
+                config->audio_output = argv[i + 1];
             } else if (strcmp(arg, "--start-retries") == 0 &&
                        parse_int_value(arg, argv[i + 1], 1, 100, &config->start_retries) != 0) {
                 return -1;
@@ -2374,6 +2427,14 @@ static int parse_arguments(int argc, char **argv, probe_config_t *config)
     if (config->command != COMMAND_AUDIO &&
         (config->audio_input != NULL || config->audio_echo_output != NULL)) {
         log_message(stderr, "--audio-input/--audio-echo-output are valid only for audio command");
+        return -1;
+    }
+    if (config->command != COMMAND_MEDIA && config->audio_output != NULL) {
+        log_message(stderr, "--audio-output is valid only for media command");
+        return -1;
+    }
+    if (config->audio_output != NULL && config->audio_output[0] == '\0') {
+        log_message(stderr, "--audio-output requires a non-empty path");
         return -1;
     }
     if (config->audio_echo_output != NULL && config->audio_echo_output[0] != '\0' &&

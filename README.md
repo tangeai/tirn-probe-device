@@ -117,8 +117,12 @@ export TIRTC_TOKEN=your_connect_token
   --device-secret-key your_device_secret_key \
   --peer-id 'whips://your-service?_tg_mode=echo' \
   --token your_connect_token \
+  --audio-output /tmp/tirn-probe-echo.pcm \
   --duration-sec 10
 ```
+
+`--audio-output` 可选，用于将收到的 Echo 音频保存为 8 kHz、16 bit、单声道的
+PCM 裸数据。播放或转码时需要显式指定上述采样格式。
 
 ### 建连诊断
 
